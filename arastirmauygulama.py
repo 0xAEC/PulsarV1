@@ -3,8 +3,8 @@ from qiskit import QuantumCircuit, QuantumRegister, ClassicalRegister, transpile
 from qiskit_aer import AerSimulator
 from qiskit.exceptions import QiskitError
 import copy
-import time # For potential timing/performance checks if needed
-import random # For more explicit random choices
+import time 
+import random 
 
 # ---------------------------------------------------------------------------
 # Class Definition: ToricCode (Generalized Toric code and Quantum error correction)
