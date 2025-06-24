@@ -2,15 +2,16 @@ import numpy as np
 import copy
 import time
 import random
-import collections # For deque
-import traceback # For printing stack traces on errors
-import math # For log2
+import collections 
+import traceback 
+import math 
 
 # ---------------------------------------------------------------------------
 # Orch OR Emulator & System Defaults
 # ---------------------------------------------------------------------------
+# REMINDER LINE 1237 don't forget to implement it b4 the deadline or i will cook ur crooked ass
 
-# Default parameters for a single emulator's internal cognitive state
+### NEW VERSION ###
 DEFAULT_INTERNAL_PARAMS = {
     'curiosity': 0.5, 'goal_seeking_bias': 0.3,
     'preferred_logical_state': None,  # Target state for problem-solving/goal-seeking
@@ -44,6 +45,14 @@ DEFAULT_INTERNAL_PARAMS = {
     'interrupt_strong_consolidation_orp_surprise_factor': 1.5, # if orp > expected * factor
     'interrupt_reactive_ltm_valence_threshold': -0.6,
     'interrupt_cognitive_fork_valence_threshold': 0.85,
+    # For LTM Contextual Recall
+    'ltm_goal_context_match_bonus': 0.15, # Bonus to utility if LTM entry context matches active goal
+    'ltm_initial_state_match_bonus': 0.10, # Bonus if LTM sequence starts from current agent state
+    'ltm_input_context_match_bonus': 0.05, # Bonus if LTM sequence was learned for similar input context
+    # ADV_REASONING_FEATURE_1: Conceptual Layer
+    'concept_logical_state_map': {},  # E.g., {'HAPPY_PLACE': '11', 'TOOL_FOUND': '01'}
+    'ltm_active_concept_match_bonus': 0.12, # Bonus if LTM sequence active concepts match current concepts
+    'clear_active_concepts_each_cycle': True, # If true, concepts are based purely on current collapsed state. If false, they persist until changed.
 }
 
 # Default parameters for metacognitive processes
@@ -210,18 +219,28 @@ class GoalState:
         }
 
     def __str__(self):
-        step_name = "None"
+        step_name_display = "None"
+        # Current step of this goal
         if 0 <= self.current_step_index < len(self.steps):
-            step_name = self.steps[self.current_step_index].get("name", f"Step {self.current_step_index+1}")
-            sub_goal_obj = self.steps[self.current_step_index].get("sub_goal")
-            if isinstance(sub_goal_obj, GoalState) and sub_goal_obj.status == "active":
-                step_name += f" -> (SubGoal: {sub_goal_obj.current_goal} - {sub_goal_obj.steps[sub_goal_obj.current_step_index].get('name')})"
-        return f"Goal: '{self.current_goal}' (Step: '{step_name}', Progress: {self.progress*100:.1f}%, Status: {self.status})"
+            current_step_of_this_goal = self.steps[self.current_step_index]
+            step_name_display = current_step_of_this_goal.get("name", f"Step {self.current_step_index+1}")
+
+            # Check if this step has an active sub-goal
+            sub_goal_obj_at_this_step = current_step_of_this_goal.get("sub_goal")
+            if isinstance(sub_goal_obj_at_this_step, GoalState) and sub_goal_obj_at_this_step.status == "active":
+                # Get the current step name *of the sub-goal*
+                sub_goal_current_step_name = "None (SubGoal)"
+                if 0 <= sub_goal_obj_at_this_step.current_step_index < len(sub_goal_obj_at_this_step.steps):
+                    sub_goal_current_step_name = sub_goal_obj_at_this_step.steps[sub_goal_obj_at_this_step.current_step_index].get("name", f"SubStep {sub_goal_obj_at_this_step.current_step_index+1}")
+                
+                step_name_display += f" -> (SubGoal Active: '{sub_goal_obj_at_this_step.current_goal}' - Step: '{sub_goal_current_step_name}', SubProgress: {sub_goal_obj_at_this_step.progress*100:.0f}%)"
+        
+        return f"Goal: '{self.current_goal}' (Step: '{step_name_display}', OwnProgress: {self.progress*100:.1f}%, Status: {self.status})"
 
 
-# ---------------------------------------------------------------------------
-# Working Memory Components (NEW FEATURE) | added on 6/3/2025 6:39 PM for coordination
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------
+# Working Memory Components (NEW FEATURE) | added on 6/3/2025 6:39 PM for coordination -- E90XAEC
+# -----------------------------------------------------------------------------------------------
 class WorkingMemoryItem:
     def __init__(self, type: str, data: dict, description: str = ""):
         self.type = type  # e.g., "goal_step_context", "intermediate_result", "backtrack_point"
@@ -368,9 +387,13 @@ class SimplifiedOrchOREmulator:
         self.firewall_cooldown_remaining = 0
         self.firewall_cycles_since_last_check = 0
 
+### NEW VERSION ###
         self.goal_state_config_params = copy.deepcopy(DEFAULT_GOAL_STATE_PARAMS)
         if goal_state_params: self.goal_state_config_params.update(goal_state_params)
         self.current_goal_state_obj = None
+
+        # ADV_REASONING_FEATURE_1: Initialize active concepts state
+        self.active_concepts = set()
 
         # NEW: Working Memory Initialization
         self.working_memory = WorkingMemoryStack(max_depth=working_memory_max_depth)
@@ -529,7 +552,7 @@ class SimplifiedOrchOREmulator:
         tag_name = event_type.upper().replace(".", "_") 
         self.current_cycle_lot_stream.append(f"#{tag_name}[{','.join(param_strs)}]")
 
-    # --- Working Memory Logging Helper (NEW) --- perhaps for 
+    # --- Working Memory Logging Helper (NEW) 
     def _log_wm_op(self, op_type: str, item: WorkingMemoryItem = None, details: dict = None):
         """Helper to log working memory operations via LoT."""
         log_data = details if details is not None else {}
@@ -755,6 +778,31 @@ class SimplifiedOrchOREmulator:
 
         self._log_lot_event("executive.objective_reduction.end", {"collapsed_to": self.collapsed_logical_state_str, "orp_experienced":self.current_orp_before_reset})
         return self.collapsed_logical_state_str
+    
+        # --- ADV_REASONING_FEATURE_1: Conceptual Layer - Activation ---
+    def _executive_update_active_concepts(self, collapsed_logical_state_str):
+        """Updates the agent's set of active concepts based on the collapsed state."""
+        concept_map = self.internal_state_parameters.get('concept_logical_state_map', {})
+        if not concept_map:
+            if self.active_concepts: # Clear if concepts exist but map is now empty
+                 self.active_concepts.clear()
+            return
+
+        # Determine if concepts should persist or be refreshed each cycle
+        if self.internal_state_parameters.get('clear_active_concepts_each_cycle', True):
+            self.active_concepts.clear()
+
+        activated_this_cycle = set()
+        for concept_name, state_pattern in concept_map.items():
+            if state_pattern == collapsed_logical_state_str:
+                self.active_concepts.add(concept_name)
+                activated_this_cycle.add(concept_name)
+
+        if activated_this_cycle:
+            if self.verbose >= 2: print(f"  EXECUTIVE.ConceptUpdate: |{collapsed_logical_state_str}> activated concepts: {activated_this_cycle}")
+            self._log_lot_event("executive.concept_update", {"state": collapsed_logical_state_str,
+                                                            "activated": list(activated_this_cycle),
+                                                            "all_active_now": list(self.active_concepts)})
 
     # --- Layer 1: Sensor Layer ---
     def _sensor_layer_process_input(self, target_classical_input_str: str) -> str:
@@ -780,9 +828,17 @@ class SimplifiedOrchOREmulator:
         return actual_classical_input_str
 
     # --- Layer 2: Associative Layer ---
-    def _associative_layer_update_ltm(self, op_sequence, raw_valence, orp_cost, entropy_gen, consolidation_factor=1.0):
+### NEW VERSION ###
+    def _associative_layer_update_ltm(self, op_sequence, raw_valence, orp_cost, entropy_gen, consolidation_factor=1.0,
+                                      initial_state_when_sequence_started="unknown", input_context_when_sequence_started="unknown"):
         if self.verbose >= 2: print(f"  ASSOCIATIVE_LAYER.LTM_Update: Seq {op_sequence if op_sequence else 'NoOps'}, Val={raw_valence:.2f}, ORP={orp_cost:.2f}, Ent={entropy_gen:.2f}, ConsolFactor={consolidation_factor:.2f}")
-        self._log_lot_event("associative.ltm_update.start", {"op_seq_len":len(op_sequence or []), "raw_valence":raw_valence, "orp_cost": orp_cost, "consol_factor": consolidation_factor, "entropy":entropy_gen})
+        self._log_lot_event("associative.ltm_update.start", {
+            "op_seq_len":len(op_sequence or []), "raw_valence":raw_valence, "orp_cost": orp_cost,
+            "consol_factor": consolidation_factor, "entropy":entropy_gen,
+            "initial_state_ctx": initial_state_when_sequence_started,
+            "input_ctx": input_context_when_sequence_started,
+            "active_concepts_for_store": list(self.active_concepts)
+        })
 
         if not op_sequence: return
         seq_tuple = tuple(tuple(op) for op in op_sequence)
@@ -791,6 +847,23 @@ class SimplifiedOrchOREmulator:
              if self.verbose >=3: print(f"    LTM_Update: Sequence {seq_tuple} not stored, raw_valence {raw_valence:.2f} too low (threshold factor 0.3).")
              self._log_lot_event("associative.ltm_update.skip_low_valence", {"seq_tuple":seq_tuple, "raw_valence":raw_valence})
              return
+
+        current_goal_name_for_ltm = None
+        current_step_name_for_ltm = None
+        if self.current_goal_state_obj and self.current_goal_state_obj.status == "active":
+            goal = self.current_goal_state_obj
+            # Ensure the current_step_index is valid for the potentially active sub-goal as well.
+            active_goal_for_context = goal
+            # If the current goal is a parent and its active step IS a sub-goal that's active, use sub-goal for context.
+            if 0 <= goal.current_step_index < len(goal.steps):
+                step_hosting_subgoal = goal.steps[goal.current_step_index]
+                potential_sub_goal = step_hosting_subgoal.get("sub_goal")
+                if isinstance(potential_sub_goal, GoalState) and potential_sub_goal.status == "active":
+                    active_goal_for_context = potential_sub_goal # Context from the deepest active sub-goal
+
+            if 0 <= active_goal_for_context.current_step_index < len(active_goal_for_context.steps):
+                current_goal_name_for_ltm = active_goal_for_context.current_goal
+                current_step_name_for_ltm = active_goal_for_context.steps[active_goal_for_context.current_step_index].get("name", f"Step_{active_goal_for_context.current_step_index}")
 
         entry = self.long_term_memory.get(seq_tuple)
         mutation_rate_store = self.internal_state_parameters.get('ltm_mutation_on_store_rate', 0.0)
@@ -801,6 +874,32 @@ class SimplifiedOrchOREmulator:
             entry['total_valence'] += raw_valence * consolidation_factor
             entry['total_orp_cost'] += orp_cost
             entry['total_entropy_generated'] += entropy_gen
+
+            # Update goal context related to this specific update event
+            entry['last_goal_context_name'] = current_goal_name_for_ltm
+            entry['last_goal_context_step'] = current_step_name_for_ltm
+            if current_goal_name_for_ltm: # If this update happened during a goal
+                context_key = (current_goal_name_for_ltm, current_step_name_for_ltm)
+                entry['goal_context_counts'] = entry.get('goal_context_counts', {})
+                entry['goal_context_counts'][context_key] = entry['goal_context_counts'].get(context_key, 0) + update_strength
+
+            # Update general context counts (less frequently, perhaps on a fraction of updates or if significant change)
+            if random.random() < 0.25 : # Update general contexts less frequently
+                entry['initial_states_seen'] = entry.get('initial_states_seen', collections.Counter())
+                entry['initial_states_seen'][initial_state_when_sequence_started] += 1
+                entry['input_contexts_seen'] = entry.get('input_contexts_seen', collections.Counter())
+                entry['input_contexts_seen'][input_context_when_sequence_started] +=1
+
+            # ADV_REASONING_FEATURE_1: Update conceptual context
+            # Store a running tally of concepts seen with this sequence
+            entry['concepts_seen_counts'] = entry.get('concepts_seen_counts', collections.Counter())
+            for concept in self.active_concepts:
+                entry['concepts_seen_counts'][concept] += update_strength
+            # Periodically update the 'most_frequent_concepts' list
+            if entry['count'] % 5 == 0: # Update every 5 times this is reinforced
+                 most_common_concepts_list = [c[0] for c in entry['concepts_seen_counts'].most_common(3)]
+                 entry['most_frequent_concepts_at_store'] = most_common_concepts_list
+
 
             if random.random() < mutation_rate_store:
                 entry['total_valence'] *= (1 + random.uniform(-0.05, 0.05) * update_strength)
@@ -840,14 +939,46 @@ class SimplifiedOrchOREmulator:
                     'total_orp_cost': current_orp_cost_store * update_strength, 'avg_orp_cost': current_orp_cost_store,
                     'total_entropy_generated': current_entropy_store * update_strength, 'avg_entropy': current_entropy_store,
                     'first_cycle': self.current_cycle_num, 'last_cycle': self.current_cycle_num,
+                    # Store initial and last context for new entries
+                    'first_goal_context_name': current_goal_name_for_ltm,
+                    'first_goal_context_step': current_step_name_for_ltm,
+                    'last_goal_context_name': current_goal_name_for_ltm,
+                    'last_goal_context_step': current_step_name_for_ltm,
+                    'goal_context_counts': {}, # Initialize
+                    # New context fields
+                    'initial_states_seen': collections.Counter({initial_state_when_sequence_started: update_strength}),
+                    'input_contexts_seen': collections.Counter({input_context_when_sequence_started: update_strength}),
+                    'most_frequent_initial_state': initial_state_when_sequence_started,
+                    'most_frequent_input_context': input_context_when_sequence_started,
+                    # ADV_REASONING_FEATURE_1: Store conceptual context for new entries
+                    'concepts_seen_counts': collections.Counter(self.active_concepts),
+                    'most_frequent_concepts_at_store': list(self.active_concepts)
                 }
-                self.long_term_memory[seq_tuple] = new_entry
-                if self.verbose >=3: print(f"    LTM_Update: Added new sequence {seq_tuple} with avg_valence {new_entry['avg_valence']:.2f}.")
-                self._log_lot_event("associative.ltm_update.new_entry", {"seq_str":str(seq_tuple), "val":new_entry['avg_valence']})
+                if current_goal_name_for_ltm: # If this new entry occurred during a goal
+                     context_key_new = (current_goal_name_for_ltm, current_step_name_for_ltm)
+                     new_entry['goal_context_counts'][context_key_new] = update_strength
 
+                self.long_term_memory[seq_tuple] = new_entry
+                log_extra = {
+                    "goal_name_ctx":current_goal_name_for_ltm or "N/A",
+                    "initial_state_ctx_new":initial_state_when_sequence_started,
+                    "input_ctx_new": input_context_when_sequence_started,
+                    "active_concepts": list(self.active_concepts)
+                }
+                if self.verbose >=3: print(f"    LTM_Update: Added new sequence {seq_tuple} with avg_valence {new_entry['avg_valence']:.2f}, Contexts: {log_extra}.")
+                self._log_lot_event("associative.ltm_update.new_entry", {"seq_str":str(seq_tuple), "val":new_entry['avg_valence'], **log_extra})
+
+        # Update utility and last cycle for existing or new entry
         if seq_tuple in self.long_term_memory:
-             self.long_term_memory[seq_tuple]['utility'] = self._associative_layer_calculate_ltm_entry_utility(self.long_term_memory[seq_tuple])
-             self.long_term_memory[seq_tuple]['last_cycle'] = self.current_cycle_num
+             current_entry_ref = self.long_term_memory[seq_tuple]
+             current_entry_ref['utility'] = self._associative_layer_calculate_ltm_entry_utility(current_entry_ref)
+             current_entry_ref['last_cycle'] = self.current_cycle_num
+             # Periodically update most frequent general contexts for existing entries
+             if current_entry_ref['count'] > 5 and random.random() < 0.1 : # Less frequent updates for established entries
+                 if current_entry_ref.get('initial_states_seen'):
+                     current_entry_ref['most_frequent_initial_state'] = current_entry_ref['initial_states_seen'].most_common(1)[0][0]
+                 if current_entry_ref.get('input_contexts_seen'):
+                     current_entry_ref['most_frequent_input_context'] = current_entry_ref['input_contexts_seen'].most_common(1)[0][0]
 
     def _associative_layer_calculate_ltm_entry_utility(self, seq_data):
         norm_orp_cost = seq_data['avg_orp_cost'] / (self.E_OR_THRESHOLD + 1e-6)
@@ -856,74 +987,170 @@ class SimplifiedOrchOREmulator:
                    0.05 * seq_data.get('avg_entropy', 0.0))
         return utility
 
-    def _associative_layer_recall_from_ltm_strategy(self, current_orp_value, exec_thought_log):
+### NEW VERSION ###
+    def _associative_layer_recall_from_ltm_strategy(self, current_orp_value, exec_thought_log,
+                                                     current_collapsed_state_for_recall_context,
+                                                     current_input_context_for_recall):
         if not self.long_term_memory:
             exec_thought_log.append("LTM recall: LTM empty.")
             return None, current_orp_value
 
-        candidate_sequences = []; weights = []
-        min_utility_for_recall = 0.05
+        min_utility_for_recall = 0.05 # Base utility threshold
+        candidate_info = [] # Store (sequence_ops_list, effective_utility, applied_bonuses_dict, original_ltm_data_dict)
+
+        active_recall_goal_name = None
+        active_recall_step_name = None
+
+        # Determine active goal for context bonus
+        # Traverse up from sub-goals if necessary to get the highest relevant goal context.
+        # For simplicity, we use the immediate self.current_goal_state_obj and its active step.
+        current_processing_goal_obj = self.current_goal_state_obj
+        # Potentially refine to check if a sub-goal is the one currently being executed, for more precise context
+        # but for now, the 'primary' goal's step provides the top-level context.
+        if current_processing_goal_obj and current_processing_goal_obj.status == "active":
+            temp_goal_for_context = current_processing_goal_obj
+            # Check if current step of 'temp_goal_for_context' is an active sub-goal, and if so, use ITS step.
+            if 0 <= temp_goal_for_context.current_step_index < len(temp_goal_for_context.steps):
+                potential_sub_goal_in_step = temp_goal_for_context.steps[temp_goal_for_context.current_step_index].get("sub_goal")
+                if isinstance(potential_sub_goal_in_step, GoalState) and potential_sub_goal_in_step.status == "active":
+                    temp_goal_for_context = potential_sub_goal_in_step # Use the active sub-goal's context
+
+            # Now, get step name from the 'temp_goal_for_context' (which might be the original or a sub-goal)
+            if 0 <= temp_goal_for_context.current_step_index < len(temp_goal_for_context.steps):
+                active_recall_goal_name = temp_goal_for_context.current_goal
+                active_recall_step_name = temp_goal_for_context.steps[temp_goal_for_context.current_step_index].get("name", f"Step_{temp_goal_for_context.current_step_index}")
+
+
+        # Retrieve bonus parameters
+        goal_ctx_bonus_val = self.internal_state_parameters.get('ltm_goal_context_match_bonus', 0.15)
+        initial_state_bonus_val = self.internal_state_parameters.get('ltm_initial_state_match_bonus', 0.10)
+        input_ctx_bonus_val = self.internal_state_parameters.get('ltm_input_context_match_bonus', 0.05)
+        concept_match_bonus_val = self.internal_state_parameters.get('ltm_active_concept_match_bonus', 0.12) # ADV_REASONING_FEATURE_1
 
         for seq_tuple, data in self.long_term_memory.items():
-            utility = data.get('utility', self._associative_layer_calculate_ltm_entry_utility(data))
-            if utility > min_utility_for_recall:
-                projected_cost = sum(self.operation_costs.get(op_data[0].upper(), 0.05) for op_data in seq_tuple)
-                if current_orp_value + projected_cost < self.E_OR_THRESHOLD * 1.2:
-                    candidate_sequences.append(list(seq_tuple))
-                    weights.append(utility**2.5)
+            base_utility = data.get('utility', self._associative_layer_calculate_ltm_entry_utility(data))
+            current_effective_utility = base_utility
+            applied_bonuses_detail = {'goal': 0.0, 'initial_state': 0.0, 'input_ctx': 0.0, 'concept': 0.0}
 
-        if not candidate_sequences:
-            exec_thought_log.append(f"LTM recall: No sequences found with utility > {min_utility_for_recall} or all too costly from ORP {current_orp_value:.2f}.")
+            # Goal Context Bonus
+            if active_recall_goal_name and data.get('last_goal_context_name') == active_recall_goal_name:
+                bonus_val_for_goal_match = goal_ctx_bonus_val * 0.5 # Default for just goal name match
+                if data.get('last_goal_context_step') == active_recall_step_name:
+                    bonus_val_for_goal_match = goal_ctx_bonus_val # Full bonus for specific step match
+                current_effective_utility += bonus_val_for_goal_match
+                applied_bonuses_detail['goal'] = bonus_val_for_goal_match
+
+            # Initial State Context Bonus
+            if data.get('most_frequent_initial_state') == current_collapsed_state_for_recall_context:
+                current_effective_utility += initial_state_bonus_val
+                applied_bonuses_detail['initial_state'] = initial_state_bonus_val
+
+            # Input Context Bonus
+            if data.get('most_frequent_input_context') == current_input_context_for_recall:
+                current_effective_utility += input_ctx_bonus_val
+                applied_bonuses_detail['input_ctx'] = input_ctx_bonus_val
+
+            # ADV_REASONING_FEATURE_1: Active Concept Match Bonus
+            if concept_match_bonus_val > 0 and self.active_concepts:
+                # Use concepts seen most frequently with this sequence from LTM
+                stored_concepts_list = data.get('most_frequent_concepts_at_store', [])
+                if stored_concepts_list:
+                    stored_concepts_set = set(stored_concepts_list)
+                    intersection_size = len(self.active_concepts.intersection(stored_concepts_set))
+                    union_size = len(self.active_concepts.union(stored_concepts_set))
+
+                    if union_size > 0:
+                        jaccard_similarity = intersection_size / union_size
+                        concept_bonus = jaccard_similarity * concept_match_bonus_val
+                        current_effective_utility += concept_bonus
+                        applied_bonuses_detail['concept'] = concept_bonus
+
+
+            if current_effective_utility > min_utility_for_recall:
+                projected_cost = sum(self.operation_costs.get(op_data[0].upper(), 0.05) for op_data in seq_tuple)
+                # Max ORP threshold consideration: allow recall if it doesn't immediately exceed, or get too close to, threshold.
+                if current_orp_value + projected_cost < self.E_OR_THRESHOLD * 1.15:
+                    candidate_info.append( (list(seq_tuple), current_effective_utility, applied_bonuses_detail, data) )
+
+        if not candidate_info:
+            exec_thought_log.append(f"LTM recall: No sequences found with effective_utility > {min_utility_for_recall} (after all context bonuses) or all too costly from ORP {current_orp_value:.2f}.")
             return None, current_orp_value
 
+        # Select from candidates based on effective utility
+        candidate_sequences = [c[0] for c in candidate_info]
+        # Weight by the *effective* utility - squared to emphasize higher utility items more
+        weights = [c[1]**2.5 for c in candidate_info]
+
         sum_weights = sum(weights)
-        if sum_weights <= 1e-6:
-             exec_thought_log.append("LTM recall: No LTM sequences with positive utility weights after filtering.")
+        if sum_weights <= 1e-6: # Should be rare if candidate_info is not empty and utilities are positive
+             exec_thought_log.append("LTM recall: No LTM sequences with positive utility weights after filtering (or all weights zero).")
              return None, current_orp_value
 
         normalized_weights = [w / sum_weights for w in weights]
-        chosen_sequence_idx = random.choices(range(len(candidate_sequences)), weights=normalized_weights, k=1)[0]
-        chosen_sequence_ops_orig = candidate_sequences[chosen_sequence_idx]
-        chosen_sequence_ops = [list(op) for op in chosen_sequence_ops_orig]
+        try:
+            chosen_index = random.choices(range(len(candidate_sequences)), weights=normalized_weights, k=1)[0]
+        except ValueError as e: # Catch empty or invalid weights
+            exec_thought_log.append(f"LTM recall: Error in weighted choice ({e}). Defaulting to highest utility if possible, or skip.")
+            if candidate_info: # Try to pick the one with max effective utility as a fallback
+                chosen_index = max(range(len(candidate_info)), key=lambda i: candidate_info[i][1])
+            else: return None, current_orp_value
 
+        chosen_sequence_ops_orig_list = candidate_sequences[chosen_index]
+        # Create a mutable copy for potential mutation
+        chosen_sequence_ops_mutable = [list(op) for op in chosen_sequence_ops_orig_list]
+
+        bonuses_applied_for_chosen = candidate_info[chosen_index][2]
+        original_ltm_data_for_chosen = candidate_info[chosen_index][3]
+
+        # LTM Mutation on Replay
         mutation_rate_replay = self.internal_state_parameters.get('ltm_mutation_on_replay_rate', 0.0)
-        if chosen_sequence_ops and random.random() < mutation_rate_replay and len(chosen_sequence_ops) > 0:
-            idx_to_mutate = random.randrange(len(chosen_sequence_ops))
-            op_char, op_arg = chosen_sequence_ops[idx_to_mutate]
-            original_op_tuple_str = f"('{op_char}', {op_arg})"
+        if chosen_sequence_ops_mutable and random.random() < mutation_rate_replay and len(chosen_sequence_ops_mutable) > 0:
+            idx_to_mutate = random.randrange(len(chosen_sequence_ops_mutable))
+            op_char, op_arg = chosen_sequence_ops_mutable[idx_to_mutate]
+            original_op_tuple_str_in_seq = f"('{op_char}', {op_arg})"
 
             mutation_type_rand = random.random()
-            if mutation_type_rand < 0.35 and op_char in ['X', 'Z', 'H'] and isinstance(op_arg, int):
-                chosen_sequence_ops[idx_to_mutate][1] = 1 - op_arg
-            elif mutation_type_rand < 0.65:
+            if mutation_type_rand < 0.35 and op_char in ['X', 'Z', 'H'] and isinstance(op_arg, int): # Flip arg for single qubit
+                chosen_sequence_ops_mutable[idx_to_mutate][1] = 1 - op_arg
+            elif mutation_type_rand < 0.65: # Change op type
                 compatible_ops={'X':['Z','H'],'Z':['X','H'],'H':['X','Z'],'CNOT':['CZ'],'CZ':['CNOT']}
                 new_op_char = random.choice(compatible_ops.get(op_char, ['X','Z','H']))
                 new_op_arg = op_arg
                 if new_op_char in ['X','Z','H']: new_op_arg = random.randint(0,1)
-                elif new_op_char in ['CNOT', 'CZ']: new_op_arg = tuple(random.sample([0,1],2))
-                chosen_sequence_ops[idx_to_mutate] = [new_op_char, new_op_arg]
-            elif len(chosen_sequence_ops) > 1 and random.random() < 0.5 :
-                del chosen_sequence_ops[idx_to_mutate]
-            else:
+                elif new_op_char in ['CNOT', 'CZ']:
+                    new_op_arg = tuple(random.sample([0,1],2)) if op_char not in ['CNOT','CZ'] else op_arg
+                chosen_sequence_ops_mutable[idx_to_mutate] = [new_op_char, new_op_arg]
+            elif len(chosen_sequence_ops_mutable) > 1 and random.random() < 0.5 : # Delete an op
+                del chosen_sequence_ops_mutable[idx_to_mutate]
+            else: # Insert a new random op
                 new_op_insert_char = random.choice(['X','Z','H'])
-                new_op_insert_arg = random.randint(0,1) if new_op_insert_char in ['X','Z','H'] else tuple(random.sample([0,1],2))
-                chosen_sequence_ops.insert(random.randint(0, len(chosen_sequence_ops)), [new_op_insert_char, new_op_insert_arg])
+                new_op_insert_arg = random.randint(0,1)
+                chosen_sequence_ops_mutable.insert(random.randint(0, len(chosen_sequence_ops_mutable)), [new_op_insert_char, new_op_insert_arg])
 
-            exec_thought_log.append(f"LTM Replay MUTATION: Op {original_op_tuple_str} in {chosen_sequence_ops_orig} -> mutated to/around in {chosen_sequence_ops}.")
-            self._log_lot_event("associative.ltm_recall.mutation", {"original_seq_str": str(chosen_sequence_ops_orig), "mutated_seq_str": str(chosen_sequence_ops)})
+            exec_thought_log.append(f"LTM Replay MUTATION: Op {original_op_tuple_str_in_seq} in original seq {chosen_sequence_ops_orig_list} -> seq potentially modified to {chosen_sequence_ops_mutable}.")
+            self._log_lot_event("associative.ltm_recall.mutation", {"original_seq_str": str(chosen_sequence_ops_orig_list), "mutated_seq_str": str(chosen_sequence_ops_mutable)})
 
-
-        projected_orp_increase_final = sum(self.operation_costs.get(op_data[0].upper(), 0.05) for op_data in chosen_sequence_ops)
-        if current_orp_value + projected_orp_increase_final >= self.E_OR_THRESHOLD * 1.1 and len(chosen_sequence_ops) > 0:
-            exec_thought_log.append(f"LTM recall: Mutated/Chosen seq {chosen_sequence_ops} too costly. ORP would be {current_orp_value + projected_orp_increase_final:.2f}. Skipped.")
+        # Final check on cost for the (potentially mutated) chosen sequence
+        projected_orp_increase_final = sum(self.operation_costs.get(op_data[0].upper(), 0.05) for op_data in chosen_sequence_ops_mutable)
+        if current_orp_value + projected_orp_increase_final >= self.E_OR_THRESHOLD * 1.1 and len(chosen_sequence_ops_mutable) > 0 :
+            exec_thought_log.append(f"LTM recall: Mutated/Chosen seq {chosen_sequence_ops_mutable} too costly. ORP would be {current_orp_value + projected_orp_increase_final:.2f}. Skipped.")
             return None, current_orp_value
 
-        final_chosen_ops_as_tuples = [tuple(op) for op in chosen_sequence_ops]
+        final_chosen_ops_as_tuples = [tuple(op) for op in chosen_sequence_ops_mutable]
 
-        orig_data_key = tuple(tuple(op) for op in chosen_sequence_ops_orig) # Ensure hashable tuple of tuples for dict key
-        orig_data = self.long_term_memory[orig_data_key]
-        exec_thought_log.append(f"LTM recall: Replaying {final_chosen_ops_as_tuples} (orig_avg_V={orig_data['avg_valence']:.2f}, util={orig_data['utility']:.2f}). Cost {projected_orp_increase_final:.2f}")
-        self._log_lot_event("associative.ltm_recall.chosen", {"seq_str":str(final_chosen_ops_as_tuples), "orig_util":orig_data['utility']})
+        bonus_summary_str = f"GoalCtx:{bonuses_applied_for_chosen['goal']:.2f},StateCtx:{bonuses_applied_for_chosen['initial_state']:.2f},InputCtx:{bonuses_applied_for_chosen['input_ctx']:.2f},ConceptCtx:{bonuses_applied_for_chosen['concept']:.2f}"
+        exec_thought_log.append(f"LTM recall: Replaying {final_chosen_ops_as_tuples} (orig_avg_V={original_ltm_data_for_chosen['avg_valence']:.2f}, base_util={original_ltm_data_for_chosen['utility']:.2f}, bonuses_sum={sum(bonuses_applied_for_chosen.values()):.2f} [{bonus_summary_str}]). Cost {projected_orp_increase_final:.2f}")
+        self._log_lot_event("associative.ltm_recall.chosen", {
+            "seq_str":str(final_chosen_ops_as_tuples),
+            "orig_util":original_ltm_data_for_chosen['utility'],
+            "applied_bonuses_sum": sum(bonuses_applied_for_chosen.values()),
+            "bonuses_detail_str": bonus_summary_str,
+            "current_state_ctx_match_val": current_collapsed_state_for_recall_context,
+            "current_input_ctx_match_val": current_input_context_for_recall,
+            "goal_context_name_at_recall": active_recall_goal_name or "N/A",
+            "goal_context_step_at_recall": active_recall_step_name or "N/A",
+            "active_concepts_at_recall": list(self.active_concepts)
+            })
         return final_chosen_ops_as_tuples, current_orp_value
 
 
@@ -1031,7 +1258,7 @@ class SimplifiedOrchOREmulator:
             'thoughts_log': acc_thoughts_log
         }
 
-# --- NEW CODE BLOCK (_executive_generate_computation_sequence - FULL FUNCTION) ---
+# --- (_executive_generate_computation_sequence - FULL FUNCTION) ---
     def _executive_generate_computation_sequence(self, ops_provided_externally=None):
         if ops_provided_externally is not None:
             if self.verbose >= 2: print(f"  EXECUTIVE_LAYER.OpGen: Using externally provided ops: {ops_provided_externally}")
@@ -1042,43 +1269,99 @@ class SimplifiedOrchOREmulator:
         self._log_lot_event("executive.opgen.start", {"orp_current":self.objective_reduction_potential, "threshold": self.E_OR_THRESHOLD})
 
         ops_sequence = []
-        chosen_strategy_name = "NoOpsMethod" # Default, will be updated
+        chosen_strategy_name = "NoOpsMethod" 
+        simulated_orp_accumulator = self.objective_reduction_potential # Used for planning op costs
+
+        # --- Check Working Memory for Intermediate Results or Ops Sequences ---
+        wm_driven_ops_found = False
+        if not self.working_memory.is_empty():
+            wm_top_item = self.working_memory.peek()
+            self._log_wm_op("peek", item=wm_top_item, details={'reason':'opgen_start_check'})
+            if wm_top_item and wm_top_item.type == "intermediate_result":
+                wm_data = wm_top_item.data
+                exec_thought_log.append(f"  WM_IntermediateResult FOUND: '{wm_top_item.description[:50]}...' DataKeys: {list(wm_data.keys())}")
+                self._log_lot_event("executive.opgen.wm_intermediate_check", {"item_type":wm_top_item.type, "desc":wm_top_item.description, "data_keys_str":str(list(wm_data.keys()))})
+
+                # Example: If WM stores a 'next_planned_ops' sequence
+                if "next_planned_ops" in wm_data and isinstance(wm_data["next_planned_ops"], list) and wm_data["next_planned_ops"]:
+                    candidate_wm_ops = [list(op) for op in wm_data["next_planned_ops"]] # Mutable copy
+                    projected_wm_ops_cost = sum(self.operation_costs.get(op[0].upper(), 0.05) for op in candidate_wm_ops)
+                    
+                    if self.objective_reduction_potential + projected_wm_ops_cost < self.E_OR_THRESHOLD * 0.98: # Check cost
+                        ops_sequence = candidate_wm_ops
+                        chosen_strategy_name = "StrategyWMIntermediateOps"
+                        wm_driven_ops_found = True
+                        exec_thought_log.append(f"    Using planned ops sequence from WM: {ops_sequence}. Cost: {projected_wm_ops_cost:.2f}")
+                        self._log_lot_event("executive.opgen.wm_intermediate.direct_ops_use", {"ops_count":len(ops_sequence), "cost":projected_wm_ops_cost})
+                        
+                        # Consume this item from WM if it's meant to be used once
+                        if wm_data.get("consume_after_use", True):
+                            popped_item = self.working_memory.pop()
+                            self._log_wm_op("pop_intermediate", item=popped_item, details={'reason':'intermediate_ops_used'})
+                    else:
+                        exec_thought_log.append(f"    WM Intermediate ops too costly (cost {projected_wm_ops_cost:.2f}). Will attempt standard generation.")
+                        self._log_lot_event("executive.opgen.wm_intermediate.direct_ops_too_costly", {"cost":projected_wm_ops_cost})
+                        # Optional: Could pop it anyway if it's uhhh invalid due to cost, or leave for later.
+                        # For now leave it mate, op_gen might choose different ops, or it expires anyways.
+
+                # Further logic could be added here to interpret other 'intermediate_result' data
+                # e.g., if 'partial_expr_state' exists, it could influence problem_solving strategy below.
+                # elif "partial_expr_state" in wm_data:
+                #    # ... bias problem solving or goal seeking based on this state ...
+
+        if wm_driven_ops_found:
+            exec_thought_log.append(f"  OpGen Result: Using ops sequence from WM Intermediate Result: {ops_sequence}")
+            self._log_lot_event("executive.opgen.end", {"ops_generated_count": len(ops_sequence), "strategy":chosen_strategy_name, "final_sim_orp": self.objective_reduction_potential + sum(self.operation_costs.get(op[0].upper(), 0.05) for op in ops_sequence)})
+            return ops_sequence, chosen_strategy_name, exec_thought_log
+        # --- End WM Intermediate Result Check ---
+
 
         effective_attention = self.internal_state_parameters['attention_level']
         cognitive_load_factor = 1.0 - (self.internal_state_parameters['cognitive_load'] * 0.65)
         num_ops_target_base = self.internal_state_parameters['computation_length_preference']
         num_ops_target = max(1, int(np.random.normal(loc=num_ops_target_base * cognitive_load_factor * effective_attention, scale=1.0)))
-        num_ops_target = min(num_ops_target, 10)
+        num_ops_target = min(num_ops_target, 10) # Max ops cap
 
         exec_thought_log.append(f"  Target ops: ~{num_ops_target} (base:{num_ops_target_base}, load_factor:{cognitive_load_factor:.2f}, attn:{effective_attention:.2f}). ORP start: {self.objective_reduction_potential:.3f}")
 
         current_strategy_weights = self.internal_state_parameters['strategy_weights'].copy()
-        ops_from_goal_hint = None # To store ops if a hint is directly used
+        ops_from_goal_hint = None 
 
-        # --- WORKING MEMORY & GOAL STATE INFLUENCE ---
+        # --- GOAL STATE INFLUENCE (uses goal_step_context from WM) ---
         active_goal_step_info = None
         active_goal_step_name = "None"
         is_goal_context_from_wm = False
 
-        if self.current_goal_state_obj and self.current_goal_state_obj.status == "active":
-            goal_obj = self.current_goal_state_obj
-            if 0 <= goal_obj.current_step_index < len(goal_obj.steps):
-                active_goal_step_info = goal_obj.steps[goal_obj.current_step_index]
-                active_goal_step_name = active_goal_step_info.get('name', f'Step{goal_obj.current_step_index}')
+        # Determine the currently executing goal (could be a sub-goal)
+        current_processing_goal = self.current_goal_state_obj
+        if current_processing_goal and current_processing_goal.status == "active":
+            temp_goal = current_processing_goal
+            # If current step of 'temp_goal' IS a sub-goal and that sub-goal is active, focus on sub-goal
+            if 0 <= temp_goal.current_step_index < len(temp_goal.steps):
+                step_hosting_subgoal = temp_goal.steps[temp_goal.current_step_index]
+                potential_sub_goal = step_hosting_subgoal.get("sub_goal")
+                if isinstance(potential_sub_goal, GoalState) and potential_sub_goal.status == "active":
+                    current_processing_goal = potential_sub_goal # Focus shifts to active sub-goal for op_gen context
+
+            # Now, use 'current_processing_goal' to get step info and check WM
+            if 0 <= current_processing_goal.current_step_index < len(current_processing_goal.steps):
+                active_goal_step_info = current_processing_goal.steps[current_processing_goal.current_step_index]
+                active_goal_step_name = active_goal_step_info.get('name', f'Step{current_processing_goal.current_step_index}')
 
                 if not self.working_memory.is_empty():
-                    wm_top_item = self.working_memory.peek()
-                    if wm_top_item.type == "goal_step_context" and \
-                       wm_top_item.data.get("goal_name") == goal_obj.current_goal and \
-                       wm_top_item.data.get("step_index") == goal_obj.current_step_index and \
-                       wm_top_item.data.get("goal_step_name") == active_goal_step_name:
+                    wm_top_item_for_goal_ctx = self.working_memory.peek() # Peek again, maybe intermediate was popped
+                    self._log_wm_op("peek", item=wm_top_item_for_goal_ctx, details={'reason':'opgen_goal_ctx_check'})
+                    if wm_top_item_for_goal_ctx and wm_top_item_for_goal_ctx.type == "goal_step_context" and \
+                       wm_top_item_for_goal_ctx.data.get("goal_name") == current_processing_goal.current_goal and \
+                       wm_top_item_for_goal_ctx.data.get("step_index") == current_processing_goal.current_step_index and \
+                       wm_top_item_for_goal_ctx.data.get("goal_step_name") == active_goal_step_name:
                         is_goal_context_from_wm = True
-                        exec_thought_log.append(f"  WM Active Context: Matched Goal '{goal_obj.current_goal}' - Step '{active_goal_step_name}'.")
-                        self._log_lot_event("executive.opgen.wm_match_goal", {"goal":goal_obj.current_goal, "step":active_goal_step_name})
+                        exec_thought_log.append(f"  WM Active GoalContext: Matched Goal '{current_processing_goal.current_goal}' - Step '{active_goal_step_name}'.")
+                        self._log_lot_event("executive.opgen.wm_match_goal", {"goal":current_processing_goal.current_goal, "step":active_goal_step_name})
         
-        if active_goal_step_info: # A goal step is active
-            self._log_lot_event("executive.opgen.goal_influence.check", {"step_name": active_goal_step_name, "is_wm_ctx":is_goal_context_from_wm})
-            exec_thought_log.append(f"  Goal Active ('{active_goal_step_name}', WM_Ctx: {is_goal_context_from_wm}): Applying influence.")
+        if active_goal_step_info: # A goal step is active (could be from main or sub-goal)
+            self._log_lot_event("executive.opgen.goal_influence.check", {"goal_name_active": current_processing_goal.current_goal, "step_name": active_goal_step_name, "is_wm_ctx":is_goal_context_from_wm})
+            exec_thought_log.append(f"  Goal Active ('{current_processing_goal.current_goal}::{active_goal_step_name}', WM_Ctx: {is_goal_context_from_wm}): Applying influence.")
 
             step_target_state = active_goal_step_info.get("target_state")
             if step_target_state:
@@ -1087,7 +1370,7 @@ class SimplifiedOrchOREmulator:
                     exec_thought_log.append(f"    Goal ('{active_goal_step_name}') mandates preferred_state to |{step_target_state}>.")
                     self._log_lot_event("executive.opgen.goal_influence.pref_state_set", {"new_pref_state": step_target_state, "source_step": active_goal_step_name})
             
-            goal_seek_boost = 0.35 if is_goal_context_from_wm else 0.25 # Stronger boost if WM context active
+            goal_seek_boost = 0.35 if is_goal_context_from_wm else 0.25 
             current_strategy_weights['goal_seek'] = min(1.0, current_strategy_weights.get('goal_seek',0.1) * (1 + goal_seek_boost) + goal_seek_boost)
             current_strategy_weights['problem_solve'] = min(1.0, current_strategy_weights.get('problem_solve',0.1) * (1.2 + (0.2 * is_goal_context_from_wm)) + (0.05 + 0.05*is_goal_context_from_wm) )
             exec_thought_log.append(f"    Goal ('{active_goal_step_name}') boosts goal_seek (~{goal_seek_boost*100:.0f}%) & problem_solve.")
@@ -1099,15 +1382,15 @@ class SimplifiedOrchOREmulator:
                 self._log_lot_event("executive.opgen.goal_ops_hint.available", {"hint_str": str(ops_hint_from_step), "step_name": active_goal_step_name})
                 
                 use_hint_roll = random.random()
-                use_hint_threshold = 0.65 if is_goal_context_from_wm else 0.45 # Higher chance to use hint if WM reinforces it
+                use_hint_threshold = 0.75 if is_goal_context_from_wm else 0.55 # Higher chance to use hint if WM reinforces it
                 
                 if use_hint_roll < use_hint_threshold:
                     projected_hint_cost = sum(self.operation_costs.get(op_data[0].upper(), 0.05) for op_data in ops_hint_from_step)
-                    max_allowable_hint_orp = self.E_OR_THRESHOLD * 0.95 # Allow hint if it's not too close to threshold
+                    max_allowable_hint_orp = self.E_OR_THRESHOLD * 0.95 
                     
                     if self.objective_reduction_potential + projected_hint_cost < max_allowable_hint_orp:
-                        ops_from_goal_hint = [list(op) for op in ops_hint_from_step] # Use a mutable copy
-                        exec_thought_log.append(f"    Attempting to use ops_hint directly (cost {projected_hint_cost:.2f} < ORP budget {max_allowable_hint_orp:.2f}).")
+                        ops_from_goal_hint = [list(op) for op in ops_hint_from_step] 
+                        exec_thought_log.append(f"    Attempting to use ops_hint from GoalStep directly (cost {projected_hint_cost:.2f} < ORP budget {max_allowable_hint_orp:.2f}).")
                         self._log_lot_event("executive.opgen.goal_ops_hint.attempt_use", {"hint_ops_str":str(ops_hint_from_step), "cost":projected_hint_cost, "max_orp":max_allowable_hint_orp})
                     else:
                         exec_thought_log.append(f"    Ops_hint from goal was too costly (cost {projected_hint_cost:.2f}). ORP budget {max_allowable_hint_orp:.2f}. Standard generation will proceed.")
@@ -1116,245 +1399,207 @@ class SimplifiedOrchOREmulator:
                     exec_thought_log.append(f"    Goal ops_hint available, but random roll ({use_hint_roll:.2f} >= {use_hint_threshold:.2f}) means not using it this time.")
                     self._log_lot_event("executive.opgen.goal_ops_hint.roll_failed", {"roll":use_hint_roll, "threshold": use_hint_threshold})
         
-        if ops_from_goal_hint:
+        if ops_from_goal_hint: # This check is important: goal hint takes precedence if viable.
             ops_sequence = ops_from_goal_hint
             chosen_strategy_name = f"StrategyGoalStepHint({active_goal_step_name})"
             exec_thought_log.append(f"  OpGen Result: Using ops sequence from goal hint: {ops_sequence}")
             self._log_lot_event("executive.opgen.end", {"ops_generated_count": len(ops_sequence), "strategy":chosen_strategy_name, "final_sim_orp":"N/A_HintUsed"})
             return ops_sequence, chosen_strategy_name, exec_thought_log
-        # --- END WORKING MEMORY & GOAL STATE INFLUENCE ---
+        # --- END GOAL STATE INFLUENCE ---
 
-
+        # --- TEMPORAL FEEDBACK GRID INFLUENCE (remains same) ---
         tfg_window = self.temporal_grid_params['feedback_window']
         grid_entries_to_consider = list(self.temporal_feedback_grid)[-tfg_window:]
-
         if grid_entries_to_consider:
             recent_valence_deltas = [g[1] for g in grid_entries_to_consider if g[1] is not None]
             recent_entropy_shifts = [g[2] for g in grid_entries_to_consider if g[2] is not None]
-
             avg_recent_valence_delta = np.mean(recent_valence_deltas) if recent_valence_deltas else 0.0
             avg_recent_entropy_shift = np.mean(recent_entropy_shifts) if recent_entropy_shifts else 0.0
-
             exec_thought_log.append(f"  TemporalGridInfo (last {len(grid_entries_to_consider)} entries): AvgValDelta={avg_recent_valence_delta:.2f}, AvgEntShift={avg_recent_entropy_shift:.2f}")
-
             valence_bias_strength = self.internal_state_parameters.get('temporal_feedback_valence_bias_strength', 0.1)
             entropy_bias_strength = self.internal_state_parameters.get('temporal_feedback_entropy_bias_strength', 0.05)
-
             if avg_recent_valence_delta < self.temporal_grid_params['low_valence_delta_threshold'] and len(recent_valence_deltas) > 0:
-                exec_thought_log.append(f"    TFG Bias: Low avg valence delta ({avg_recent_valence_delta:.2f} < {self.temporal_grid_params['low_valence_delta_threshold']}). Increasing exploration/memory focus.")
+                exec_thought_log.append(f"    TFG Bias: Low avg valence delta ({avg_recent_valence_delta:.2f}). Increasing exploration/memory.")
                 delta_v_bias_amount = abs(avg_recent_valence_delta) * valence_bias_strength
-                current_strategy_weights['problem_solve'] = max(0.01, current_strategy_weights['problem_solve'] * (1 - delta_v_bias_amount))
-                current_strategy_weights['goal_seek'] = max(0.01, current_strategy_weights['goal_seek'] * (1 - delta_v_bias_amount)) # Dampen goal seek if recent trend bad
-                current_strategy_weights['curiosity'] = min(0.99, current_strategy_weights.get('curiosity',0.1) + delta_v_bias_amount * 0.6 + 0.03)
-                current_strategy_weights['memory'] = min(0.99, current_strategy_weights.get('memory',0.1) + delta_v_bias_amount * 0.4 + 0.03)
-                self._log_lot_event("executive.opgen.temporal_bias.neg_val_delta", {
-                    "val_delta": avg_recent_valence_delta, "bias_str": valence_bias_strength, "bias_eff": delta_v_bias_amount
-                })
-
+                current_strategy_weights['problem_solve'] = max(0.01, current_strategy_weights['problem_solve'] * (1 - delta_v_bias_amount * 0.5))
+                current_strategy_weights['goal_seek'] = max(0.01, current_strategy_weights['goal_seek'] * (1 - delta_v_bias_amount)) 
+                current_strategy_weights['curiosity'] = min(0.99, current_strategy_weights.get('curiosity',0.1) + delta_v_bias_amount * 0.7 + 0.03)
+                current_strategy_weights['memory'] = min(0.99, current_strategy_weights.get('memory',0.1) + delta_v_bias_amount * 0.5 + 0.03)
+                self._log_lot_event("executive.opgen.temporal_bias.neg_val_delta", {"val_delta": avg_recent_valence_delta, "bias_str": valence_bias_strength, "bias_eff": delta_v_bias_amount})
             if avg_recent_entropy_shift > self.temporal_grid_params['high_entropy_shift_threshold'] and avg_recent_valence_delta < 0.05 and len(recent_entropy_shifts) > 0 :
-                exec_thought_log.append(f"    TFG Bias: High avg entropy shift ({avg_recent_entropy_shift:.2f} > {self.temporal_grid_params['high_entropy_shift_threshold']}) with low/neutral valence. Increasing memory focus, reducing curiosity.")
+                exec_thought_log.append(f"    TFG Bias: High avg entropy shift ({avg_recent_entropy_shift:.2f}). Increasing memory, reducing curiosity.")
                 delta_e_bias_amount = avg_recent_entropy_shift * entropy_bias_strength
                 current_strategy_weights['curiosity'] = max(0.01, current_strategy_weights.get('curiosity',0.1) * (1 - delta_e_bias_amount))
-                current_strategy_weights['memory'] = min(0.99, current_strategy_weights.get('memory',0.1) + delta_e_bias_amount * 0.7 + 0.03)
-                self._log_lot_event("executive.opgen.temporal_bias.high_ent_shift", {
-                    "ent_shift": avg_recent_entropy_shift, "bias_str": entropy_bias_strength, "bias_eff": delta_e_bias_amount
-                })
+                current_strategy_weights['memory'] = min(0.99, current_strategy_weights.get('memory',0.1) + delta_e_bias_amount * 0.8 + 0.03)
+                self._log_lot_event("executive.opgen.temporal_bias.high_ent_shift", {"ent_shift": avg_recent_entropy_shift, "bias_str": entropy_bias_strength, "bias_eff": delta_e_bias_amount})
         else:
-            exec_thought_log.append("  TemporalGridInfo: Grid empty or too few entries for feedback.")
+            exec_thought_log.append("  TemporalGridInfo: Grid empty/too few entries for feedback.")
+        # --- END TFG ---
+        
 
-        # General Goal State influence (if active_goal_step_info was NOT processed above, or as a minor fallback)
-        if self.current_goal_state_obj and self.current_goal_state_obj.status == "active" and not active_goal_step_info:
-             # This condition means a goal is active, but its specific step info wasn't primary driver (e.g. hint wasn't taken)
-            goal_obj = self.current_goal_state_obj
-            if 0 <= goal_obj.current_step_index < len(goal_obj.steps):
-                fallback_step_info = goal_obj.steps[goal_obj.current_step_index]
-                fallback_step_name = fallback_step_info.get('name', f'Step{goal_obj.current_step_index}')
-                exec_thought_log.append(f"  General Goal Influence ('{fallback_step_name}' still active): Applying moderate strategy boosts.")
-                current_strategy_weights['goal_seek'] = min(1.0, current_strategy_weights.get('goal_seek',0.1) * 1.15 + 0.1) # Moderate general boost
-                current_strategy_weights['problem_solve'] = min(1.0, current_strategy_weights.get('problem_solve',0.1) * 1.1 + 0.03)
+        # General Goal State influence (fallback if specific active_goal_step_info was NOT primary driver for hint)
+        if self.current_goal_state_obj and self.current_goal_state_obj.status == "active" and not ops_from_goal_hint: # and not active_goal_step_info (means we didn't get hint)
+            goal_obj_fallback = self.current_goal_state_obj # Use the top-level goal for fallback context.
+            # Could refine to use 'current_processing_goal' if sub-goals need different fallback biases
+            if 0 <= goal_obj_fallback.current_step_index < len(goal_obj_fallback.steps):
+                fallback_step_info = goal_obj_fallback.steps[goal_obj_fallback.current_step_index]
+                fallback_step_name = fallback_step_info.get('name', f'Step{goal_obj_fallback.current_step_index}')
+                if not active_goal_step_info: # Only log/apply this general fallback if no specific step info was processed
+                     exec_thought_log.append(f"  General Goal Influence ('{fallback_step_name}' still active, no specific hint taken): Applying moderate strategy boosts.")
+                     current_strategy_weights['goal_seek'] = min(1.0, current_strategy_weights.get('goal_seek',0.1) * 1.15 + 0.1) 
+                     current_strategy_weights['problem_solve'] = min(1.0, current_strategy_weights.get('problem_solve',0.1) * 1.1 + 0.03)
+                     fallback_target_state = fallback_step_info.get("target_state")
+                     if fallback_target_state and self.internal_state_parameters['preferred_logical_state'] != fallback_target_state:
+                         self.internal_state_parameters['preferred_logical_state'] = fallback_target_state
+                         exec_thought_log.append(f"    Fallback Goal Logic sets preferred_state to |{fallback_target_state}> for step '{fallback_step_name}'.")
+                         self._log_lot_event("executive.opgen.fallback_goal_influence.pref_state", {"new_pref_state":fallback_target_state, "source_step":fallback_step_name})
 
-                fallback_target_state = fallback_step_info.get("target_state")
-                if fallback_target_state and self.internal_state_parameters['preferred_logical_state'] != fallback_target_state:
-                    self.internal_state_parameters['preferred_logical_state'] = fallback_target_state
-                    exec_thought_log.append(f"    Fallback Goal Logic sets preferred_state to |{fallback_target_state}> for step '{fallback_step_name}'.")
-                    self._log_lot_event("executive.opgen.fallback_goal_influence.pref_state", {"new_pref_state":fallback_target_state, "source_step":fallback_step_name})
-
-
+        # Exploration mode and Interrupt flags (remain same)
         if self.internal_state_parameters['exploration_mode_countdown'] > 0:
-            exec_thought_log.append("  Exploration mode active: Boosting curiosity, reducing goal/problem focus.")
+            exec_thought_log.append("  Exploration mode active: Boosting curiosity.")
             current_strategy_weights['curiosity'] = min(1.0, current_strategy_weights.get('curiosity',0.1)*2.8)
-            current_strategy_weights['problem_solve'] *= 0.5 # Dampen specific problem solving
-            current_strategy_weights['goal_seek'] *= 0.3   # Significantly dampen direct goal seeking
+            current_strategy_weights['problem_solve'] *= 0.5 
+            current_strategy_weights['goal_seek'] *= 0.3   
             self._log_lot_event("executive.opgen.exploration_bias", {"new_cur_weight": current_strategy_weights['curiosity']})
-
-
         if self.smn_internal_flags.get('force_ltm_reactive_op_next_cycle', False):
-            exec_thought_log.append("  SMN/Interrupt Flag: Forcing LTM Reactive operation strategy.")
-            # Override all other weights to ensure LTM recall is chosen
+            exec_thought_log.append("  SMN/Interrupt Flag: Forcing LTM Reactive operation.")
             current_strategy_weights = {'memory': 1.0, 'problem_solve': 0.001, 'goal_seek': 0.001, 'curiosity': 0.001}
-            self.smn_internal_flags['force_ltm_reactive_op_next_cycle'] = False # Consume flag
+            self.smn_internal_flags['force_ltm_reactive_op_next_cycle'] = False 
             self._log_lot_event("executive.opgen.interrupt_bias.force_ltm", {})
 
-        # Normalize strategy weights
-        for key in DEFAULT_INTERNAL_PARAMS['strategy_weights']: # Ensure all keys exist
-            if key not in current_strategy_weights: current_strategy_weights[key] = 0.001 # Small default if missing
-
+        # Normalize strategy weights (remains same)
+        for key in DEFAULT_INTERNAL_PARAMS['strategy_weights']: 
+            if key not in current_strategy_weights: current_strategy_weights[key] = 0.001 
         valid_weights = {k: v for k, v in current_strategy_weights.items() if isinstance(v, (int, float))}
         total_weight = sum(w for w in valid_weights.values() if w > 0)
-
-        if total_weight <= 1e-6: # Prevent division by zero, default to curiosity
+        if total_weight <= 1e-6: 
             exec_thought_log.append("  Warning: Strategy weights sum to near zero. Defaulting to curiosity.")
             current_strategy_weights = {k: 0.0 for k in DEFAULT_INTERNAL_PARAMS['strategy_weights']}
-            current_strategy_weights['curiosity'] = 1.0
-            valid_weights = {'curiosity': 1.0}
-            total_weight = 1.0
-
-        strategy_choices = []
-        strategy_probs = []
+            current_strategy_weights['curiosity'] = 1.0; valid_weights = {'curiosity': 1.0}; total_weight = 1.0
+        strategy_choices, strategy_probs = [], []
         for s_name, s_weight in valid_weights.items():
-            strategy_choices.append(s_name)
-            # Ensure probability is non-negative
-            strategy_probs.append(max(0, s_weight) / total_weight if total_weight > 1e-6 else 1.0/len(valid_weights if valid_weights else [1]))
-
+            strategy_choices.append(s_name); strategy_probs.append(max(0, s_weight) / total_weight if total_weight > 1e-6 else 1.0/len(valid_weights if valid_weights else [1]))
         try:
             selected_strategy = random.choices(strategy_choices, weights=strategy_probs, k=1)[0]
-        except ValueError as e: # Handle cases where all weights might have become zero due to aggressive scaling
+        except ValueError as e: 
             selected_strategy = 'curiosity'
-            exec_thought_log.append(f"  Error in strategy selection (probs sum to {sum(strategy_probs)}, choices {strategy_choices}, error: {e}). Defaulting to curiosity.")
-            # Ensure valid probabilities for logging / subsequent use if error occurs
+            exec_thought_log.append(f"  Error in strategy selection ({e}). Defaulting to curiosity.")
             if not strategy_choices: strategy_choices = ['curiosity']
             strategy_probs = [1.0/len(strategy_choices)] * len(strategy_choices)
-
-
         exec_thought_log.append(f"  Strategy weights (norm): { {s:f'{p:.3f}' for s,p in zip(strategy_choices, strategy_probs)} }")
         exec_thought_log.append(f"  Selected primary strategy: {selected_strategy}")
         self._log_lot_event("executive.opgen.strategy_selected", {"strategy":selected_strategy, "weights_str": str({s:f'{p:.2f}' for s,p in zip(strategy_choices, strategy_probs)}) })
 
-        simulated_orp_accumulator = self.objective_reduction_potential
-
+        # LTM Recall with new context arguments
         if selected_strategy == 'memory':
-            replay_ops, _ = self._associative_layer_recall_from_ltm_strategy(simulated_orp_accumulator, exec_thought_log)
+            # Pass current state and input context for richer LTM recall
+            replay_ops, _ = self._associative_layer_recall_from_ltm_strategy(
+                simulated_orp_accumulator, exec_thought_log,
+                current_collapsed_state_for_recall_context=self.collapsed_logical_state_str,
+                current_input_context_for_recall=self.next_target_input_state # or actual_input_state if available earlier
+            )
             if replay_ops:
                 ops_sequence = replay_ops
-                chosen_strategy_name = "StrategyLTMReplay"
+                chosen_strategy_name = "StrategyLTMReplayEnhancedContext"
 
+        # Problem Solving and Op Generation Loop (remains largely same, could be further enhanced by WM intermediate state)
         if not ops_sequence and selected_strategy == 'problem_solve':
             pref_state = self.internal_state_parameters['preferred_logical_state']
+            # Potential enhancement: If WM has a 'partial_expr_state', use that instead of self.collapsed_logical_state_str for planning.
+            current_state_for_ps = self.collapsed_logical_state_str 
+            # wm_peek = self.working_memory.peek()
+            # if wm_peek and wm_peek.type == "intermediate_result" and "achieved_sub_state" in wm_peek.data:
+            # current_state_for_ps = wm_peek.data["achieved_sub_state"]
+            # exec_thought_log.append(f"  ProblemSolving using intermediate state |{current_state_for_ps}> from WM.")
+            
             if pref_state:
-                exec_thought_log.append(f"  ProblemSolving towards |{pref_state}> from |{self.collapsed_logical_state_str}>")
-                current_l1,current_l0=int(self.collapsed_logical_state_str[0]),int(self.collapsed_logical_state_str[1])
+                exec_thought_log.append(f"  ProblemSolving towards |{pref_state}> from current state |{current_state_for_ps}>")
+                current_l1,current_l0=int(current_state_for_ps[0]),int(current_state_for_ps[1])
                 target_l1,target_l0=int(pref_state[0]),int(pref_state[1])
                 planned_problem_ops = []
                 temp_plan_orp = simulated_orp_accumulator + self.operation_costs.get('PLANNING_BASE', 0.02)
-
-                # Heuristic: If states are very different (e.g. "00" to "11"), consider Hadamard
                 if abs((current_l0+current_l1) - (target_l0+target_l1)) >=2 and random.random() < 0.4 :
                     op_cost_h = self.operation_costs.get('H', 0.3)
                     if temp_plan_orp + op_cost_h < self.E_OR_THRESHOLD:
-                         h_target_q = 0 if current_l0 != target_l0 else 1 # Heuristic which qubit to H
+                         h_target_q = 0 if current_l0 != target_l0 else 1 
                          planned_problem_ops.append(('H', h_target_q)); temp_plan_orp += op_cost_h
-                         exec_thought_log.append(f"    ProblemSolving plan included H for |{pref_state}>.")
-
-                # Flip bits to match target_state
                 if current_l0 != target_l0:
                     op_cost = self.operation_costs.get('X',0.1)
                     if temp_plan_orp + op_cost < self.E_OR_THRESHOLD: planned_problem_ops.append(('X',0)); temp_plan_orp += op_cost
-                    else: exec_thought_log.append(f"    PS: Cannot apply ('X',0) to reach target |{pref_state}> due to ORP limit.")
                 if current_l1 != target_l1:
                     op_cost = self.operation_costs.get('X',0.1)
                     if temp_plan_orp + op_cost < self.E_OR_THRESHOLD: planned_problem_ops.append(('X',1)); temp_plan_orp += op_cost
-                    else: exec_thought_log.append(f"    PS: Cannot apply ('X',1) to reach target |{pref_state}> due to ORP limit.")
-                
-                # Further refinements for ProblemSolve can be added, e.g. CNOTs if bits need to be correlated for goal
-
                 if planned_problem_ops:
                     ops_sequence = planned_problem_ops
                     chosen_strategy_name = "StrategyProblemSolving"
-                    exec_thought_log.append(f"    ProblemSolving plan: {ops_sequence}")
-                elif pref_state == self.collapsed_logical_state_str:
+                elif pref_state == current_state_for_ps:
                      exec_thought_log.append(f"    ProblemSolving: Already at preferred state |{pref_state}>.")
-                else: # No ops planned but target not met
-                     exec_thought_log.append(f"    ProblemSolving: No viable ops plan generated to |{pref_state}> (possibly ORP limited or simple flips not enough).")
-            else: # No preferred_state
-                exec_thought_log.append("  ProblemSolving selected, but no preferred_logical_state is set. Falling through to general loop.")
-                selected_strategy = 'curiosity' # Fallback if PS fails due to no target
+            else: 
+                exec_thought_log.append("  ProblemSolving selected, but no preferred_logical_state is set. Falling through.")
+                selected_strategy = 'curiosity' 
 
-        # This loop runs if:
-        # 1. LTM replay didn't yield ops (or wasn't chosen)
-        # 2. ProblemSolving didn't yield ops (or wasn't chosen, or had no target)
-        # OR if selected_strategy was 'goal_seek' (with preferred_state) or 'curiosity' from the start.
-        if not ops_sequence:
+        if not ops_sequence: # Fallback op generation loop
             pref_s_for_loop = self.internal_state_parameters['preferred_logical_state']
-            
-            # Determine mode for the loop
             is_goal_seek_mode_loop = False
             if selected_strategy == 'goal_seek' and pref_s_for_loop:
                 chosen_strategy_name = "StrategyGoalSeekingLoop"
-                exec_thought_log.append(f"  Executing GoalSeeking op generation towards |{pref_s_for_loop}>")
                 is_goal_seek_mode_loop = True
-            else: # Includes 'curiosity', or 'problem_solve'/'goal_seek' that fell through due to no target/ops
+            else: 
                 chosen_strategy_name = "StrategyCuriosityDrivenLoop"
-                exec_thought_log.append(f"  Executing CuriosityDriven (or fallback) op generation.")
             
-            # Get current "simulated" state if ops were applied in thought
-            # For simplicity, use the last actual collapsed state as the basis for random op gen.
-            c_l1, c_l0 = int(self.collapsed_logical_state_str[0]), int(self.collapsed_logical_state_str[1])
+            start_state_for_loop_gen = self.collapsed_logical_state_str # Base this on actual current state
+            # Could also use WM intermediate state if available, similar to ProblemSolving section.
+            c_l1, c_l0 = int(start_state_for_loop_gen[0]), int(start_state_for_loop_gen[1])
+            exec_thought_log.append(f"  Executing {chosen_strategy_name} from |{start_state_for_loop_gen}>" + (f" towards |{pref_s_for_loop}>" if is_goal_seek_mode_loop and pref_s_for_loop else ""))
 
             for op_count in range(num_ops_target):
-                op_c, op_a = 'X', 0 # Default op if choices fail
-                
-                if is_goal_seek_mode_loop:
-                    # Simple directed ops if goal seeking
+                op_c, op_a = 'X', 0 
+                if is_goal_seek_mode_loop and pref_s_for_loop:
                     t_l1, t_l0 = int(pref_s_for_loop[0]), int(pref_s_for_loop[1])
                     if c_l0 != t_l0 : op_c, op_a = 'X', 0
                     elif c_l1 != t_l1 : op_c, op_a = 'X', 1
-                    elif random.random() < 0.5: op_c,op_a = ('H',random.randint(0,1)) # Try Hadamard if at target
-                    else: # If bits match, try more complex or random ops
+                    elif random.random() < 0.5: op_c,op_a = ('H',random.randint(0,1)) 
+                    else: 
                         op_c = random.choice(['H','Z'] + (['CNOT','CZ'] if random.random() < 0.35 else []))
                         op_a = random.randint(0,1) if op_c in ['H','X','Z'] else tuple(random.sample([0,1],2))
-                else: # Curiosity-driven or other fallbacks
+                else: 
                     op_choices = ['X','Z','H']
-                    if random.random() < 0.45: op_choices.extend(['CNOT', 'CZ']) # More 2-qubit ops
+                    if random.random() < 0.45: op_choices.extend(['CNOT', 'CZ']) 
                     op_c = random.choice(op_choices)
                     op_a = random.randint(0,1) if op_c in ['X','Z','H'] else tuple(random.sample([0,1],2))
-
                 op_cost = self.operation_costs.get(op_c.upper(), 0.05)
-
-                attention_lapse_prob = (self.internal_state_parameters['cognitive_load'] * 0.2) + \
-                                      (1.0 - effective_attention) * 0.15
+                attention_lapse_prob = (self.internal_state_parameters['cognitive_load'] * 0.2) + (1.0 - effective_attention) * 0.15
                 if random.random() < attention_lapse_prob:
-                    original_op_tuple = (op_c, op_a)
-                    if op_c in ['X','Z','H'] and isinstance(op_a,int): op_a = 1 - op_a # Flip target
-                    elif op_c in ['CNOT','CZ'] and isinstance(op_a,tuple): op_a = (op_a[1],op_a[0]) # Swap ctrl/target
-                    else: # Change op type
-                        op_c = random.choice(['X','Z']) if op_c not in ['X','Z'] else 'H'
-
+                    original_op_tuple = (op_c, op_a) # Store original for logging
+                    if op_c in ['X','Z','H'] and isinstance(op_a,int): op_a = 1 - op_a 
+                    elif op_c in ['CNOT','CZ'] and isinstance(op_a,tuple): op_a = (op_a[1],op_a[0]) 
+                    else: op_c = random.choice(['X','Z']) if op_c not in ['X','Z'] else 'H'
                     op_cost += self.operation_costs.get('ERROR_PENALTY',0.05) * 0.5
-                    exec_thought_log.append(f"      ATTENTION LAPSE! Op {original_op_tuple} -> ({op_c},{op_a}), cost penalty. LapseProb={attention_lapse_prob:.2f}")
+                    exec_thought_log.append(f"      ATTENTION LAPSE! Op {original_op_tuple} -> ({op_c},{op_a})")
                     self._log_lot_event("executive.opgen.attention_lapse", {"original_op_str":str(original_op_tuple), "mutated_op_str":str((op_c,op_a)), "lapse_prob":attention_lapse_prob})
 
-                if simulated_orp_accumulator + op_cost < self.E_OR_THRESHOLD * 0.98 : # Safety margin
+                if simulated_orp_accumulator + op_cost < self.E_OR_THRESHOLD * 0.98 : 
                     ops_sequence.append((op_c,op_a))
                     simulated_orp_accumulator += op_cost
-                    # Update simulated c_l0, c_l1 if 'X' op was applied for next iter of goal seeking loop
-                    if is_goal_seek_mode_loop and op_c == 'X':
+                    if is_goal_seek_mode_loop and op_c == 'X': # Update simulated state for goal seeking loop
                         if op_a == 0: c_l0 = 1 - c_l0
                         else: c_l1 = 1 - c_l1
                 else:
-                    exec_thought_log.append(f"    OpGen loop ({op_count+1}/{num_ops_target}): Op ('{op_c}',{op_a}) cost {op_cost:.2f} would exceed ORP. Stopping. (SimORP {simulated_orp_accumulator:.2f} + {op_cost:.2f} vs E_OR {self.E_OR_THRESHOLD:.2f})")
-                    break # Stop adding ops if ORP budget is tight
-
-        # Final check on chosen_strategy_name if ops_sequence is still empty after all attempts
+                    exec_thought_log.append(f"    OpGen loop ({chosen_strategy_name}): Op ('{op_c}',{op_a}) cost {op_cost:.2f} too high. Stopping. SimORP {simulated_orp_accumulator:.2f}")
+                    break
+        
+        # Final cleanup for strategy name
         if not ops_sequence:
-            if chosen_strategy_name not in ["StrategyLTMReplay", "StrategyProblemSolving", "StrategyGoalStepHint"]: # If it wasn't one of these that failed
+            if chosen_strategy_name not in ["StrategyLTMReplayEnhancedContext", "StrategyProblemSolving", "StrategyGoalStepHint", "StrategyWMIntermediateOps"]:
                 chosen_strategy_name = "NoOpsGeneratedByAnyMethod"
             exec_thought_log.append("  Final Result: No operations generated by any strategy this cycle.")
-        elif chosen_strategy_name == "NoOpsMethod": # If ops_sequence got filled but strategy name wasn't updated
-             chosen_strategy_name = "StrategyUnknownSourceOrLoopPopulated" # A more indicative fallback name
+        elif chosen_strategy_name == "NoOpsMethod": 
+             chosen_strategy_name = "StrategyUnknownSourceOrLoopPopulated"
 
 
         self._log_lot_event("executive.opgen.end", {"ops_generated_count": len(ops_sequence), "strategy":chosen_strategy_name, "final_sim_orp":simulated_orp_accumulator})
         return ops_sequence, chosen_strategy_name, exec_thought_log
+        # --- END WORKING MEMORY & GOAL STATE INFLUENCE ---
 
 
     def _executive_plan_next_target_input(self, current_outcome_str, executive_eval_results, exec_thought_log):
@@ -2193,7 +2438,10 @@ class SimplifiedOrchOREmulator:
         num_superposition_terms = len([a for a in self.logical_superposition.values() if abs(a) > 1e-9])
 
         collapsed_outcome_str = self._executive_trigger_objective_reduction()
-        orp_at_collapse = self.current_orp_before_reset 
+        orp_at_collapse = self.current_orp_before_reset
+
+        # ADV_REASONING_FEATURE_1: Update active concepts based on the collapsed state.
+        self._executive_update_active_concepts(collapsed_outcome_str)
 
         if self.verbose >= 1: print(f"  ExecutiveLayer OR: Collapsed to |{collapsed_outcome_str}> (ORP experienced: {orp_at_collapse:.3f}, Early OR: {or_triggered_early}, Entropy: {entropy_at_collapse:.2f})")
 
@@ -2216,7 +2464,25 @@ class SimplifiedOrchOREmulator:
             self._log_lot_event("coagent.attention_share", {"state":collapsed_outcome_str, "valence":self.last_cycle_valence_mod, "ops_count": len(executed_sequence or [])})
 
         consolidation_bonus = self.smn_internal_flags.pop('ltm_consolidation_bonus_factor', 1.0)
-        self._associative_layer_update_ltm(executed_sequence, self.last_cycle_valence_raw, orp_at_collapse, entropy_at_collapse, consolidation_factor=consolidation_bonus)
+        
+        # Determine context for LTM update:
+        # initial_state_when_sequence_started should ideally be the state *before* executed_sequence was applied.
+        # This is self.collapsed_logical_state_str *from the previous cycle*, or `actual_classical_input_str` if it's the first real operation.
+        # For simplicity, if history exists, use prev cycle's collapsed state. Otherwise, use current actual input.
+        state_context_for_ltm = actual_classical_input_str # Default if no history
+        if self.cycle_history and len(self.cycle_history) > 0: # Check if cycle_history itself is not empty
+            last_hist_entry = self.cycle_history[-1]
+            if last_hist_entry and 'collapsed_to' in last_hist_entry: # Check if the entry is valid
+                 state_context_for_ltm = last_hist_entry['collapsed_to']
+            elif 'actual_input_state_used' in last_hist_entry: # Fallback to input used in that history entry
+                 state_context_for_ltm = last_hist_entry['actual_input_state_used']
+
+        self._associative_layer_update_ltm(
+            executed_sequence, self.last_cycle_valence_raw, orp_at_collapse, entropy_at_collapse, 
+            consolidation_factor=consolidation_bonus,
+            initial_state_when_sequence_started=state_context_for_ltm,
+            input_context_when_sequence_started=actual_classical_input_str # The input that initiated this cycle's superposition
+        )
         if self.verbose >=2 and consolidation_bonus > 1.0 : print(f"  AssociativeLayer LTM Update applied consolidation bonus: {consolidation_bonus:.1f}")
 
         self._meta_layer_update_cognitive_parameters(orp_at_collapse, len(executed_sequence or []), executive_eval_results, entropy_at_collapse)
@@ -3245,4 +3511,3 @@ if __name__ == '__main__':
 
 
     print("\n\n--- ALL DEMOS COMPLETED ---")
-
