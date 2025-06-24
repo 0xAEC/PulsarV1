@@ -53,6 +53,11 @@ DEFAULT_INTERNAL_PARAMS = {
     'concept_logical_state_map': {},  # E.g., {'HAPPY_PLACE': '11', 'TOOL_FOUND': '01'}
     'ltm_active_concept_match_bonus': 0.12, # Bonus if LTM sequence active concepts match current concepts
     'clear_active_concepts_each_cycle': True, # If true, concepts are based purely on current collapsed state. If false, they persist until changed.
+    'enable_counterfactual_simulation': True,
+    'counterfactual_sim_reject_threshold': -0.1, # Reject plans if estimated valence is below this
+    'enable_hierarchical_planning': True,
+    'enable_analogical_planning': True,
+    'analogical_planning_similarity_threshold': 0.75, # Min score to consider an LTM entry analogous
 }
 
 # Default parameters for metacognitive processes
@@ -1600,6 +1605,208 @@ class SimplifiedOrchOREmulator:
         self._log_lot_event("executive.opgen.end", {"ops_generated_count": len(ops_sequence), "strategy":chosen_strategy_name, "final_sim_orp":simulated_orp_accumulator})
         return ops_sequence, chosen_strategy_name, exec_thought_log
         # --- END WORKING MEMORY & GOAL STATE INFLUENCE ---
+
+    # ------------------------------------------------------------------------------------------
+    # --- Advanced Reasoning & Planning Engine (Hierarchical, Analogical, Counterfactual) ---
+    # ------------------------------------------------------------------------------------------
+
+    def _reasoning_simulate_counterfactual(self, ops_sequence_to_test, exec_thought_log):
+        """
+        Internally simulates a sequence of operations to estimate its outcome without full execution.
+        This represents a form of "what-if" thinking or imagination.
+
+        Args:
+            ops_sequence_to_test (list): The list of operations [('OP', arg), ...] to simulate.
+            exec_thought_log (list): The log to append thoughts to.
+
+        Returns:
+            dict: A dictionary containing {'estimated_valence': float, 'estimated_orp': float, 'is_valid': bool}
+        """
+        if not ops_sequence_to_test:
+            return {'estimated_valence': 0.0, 'estimated_orp': self.objective_reduction_potential, 'is_valid': False}
+
+        if self.verbose >= 2: exec_thought_log.append(f"  CounterfactualSim: Testing sequence {ops_sequence_to_test}")
+        self._log_lot_event("reasoning.counterfactual_sim.start", {"ops_count": len(ops_sequence_to_test), "start_orp": self.objective_reduction_potential})
+
+        try:
+            sim_superposition = copy.deepcopy(self.logical_superposition)
+            sim_orp = self.objective_reduction_potential
+
+            for op_char, op_arg in ops_sequence_to_test:
+                # Use a simplified cost accumulation for speed, as we are not checking for early OR.
+                sim_superposition, sim_orp = self._apply_logical_op_to_superposition(op_char, op_arg, sim_superposition, sim_orp)
+
+            # After applying all ops, estimate the expected valence from the resulting superposition
+            probabilities = {state: abs(amp)**2 for state, amp in sim_superposition.items()}
+            # Normalize probabilities just in case of float inaccuracies
+            prob_sum = sum(probabilities.values())
+            if prob_sum > 1e-9:
+                estimated_valence = sum(self.outcome_valence_map.get(state, 0.0) * (prob / prob_sum) for state, prob in probabilities.items())
+            else:
+                estimated_valence = -1.0 # Invalid superposition state
+
+            exec_thought_log.append(f"    CounterfactualSim Result: Est. Valence={estimated_valence:.3f}, Est. ORP={sim_orp:.3f}")
+            self._log_lot_event("reasoning.counterfactual_sim.result", {"est_valence": estimated_valence, "est_orp": sim_orp})
+            return {'estimated_valence': estimated_valence, 'estimated_orp': sim_orp, 'is_valid': True}
+
+        except Exception as e:
+            exec_thought_log.append(f"    CounterfactualSim ERROR: {e}")
+            self._log_lot_event("reasoning.counterfactual_sim.error", {"error_str": str(e)})
+            return {'estimated_valence': -1.0, 'estimated_orp': self.objective_reduction_potential, 'is_valid': False}
+
+
+    def _advanced_planning_find_analogous_solution(self, current_goal_step, current_state, exec_thought_log):
+        """
+        Searches LTM for structurally similar, previously successful solutions to adapt for the current goal.
+
+        Args:
+            current_goal_step (dict): The current goal step dictionary.
+            current_state (str): The agent's current collapsed logical state string.
+            exec_thought_log (list): The log to append thoughts to.
+
+        Returns:
+            list or None: A list of operations if an analogous solution is found, otherwise None.
+        """
+        target_state = current_goal_step.get("target_state")
+        if not target_state or not self.long_term_memory:
+            return None
+
+        self._log_lot_event("reasoning.analogical_planning.start", {"current_state": current_state, "target_state": target_state, "goal_step": current_goal_step.get('name')})
+        exec_thought_log.append(f"  AnalogicalPlanning: Searching LTM for path |{current_state}> -> |{target_state}>")
+
+        candidates = []
+        for seq_tuple, data in self.long_term_memory.items():
+            if not data.get('most_frequent_initial_state') or not data.get('most_frequent_outcome_state'):
+                continue
+
+            # Hamming distance for similarity (for 2-bit system)
+            initial_dist = sum(c1 != c2 for c1, c2 in zip(current_state, data['most_frequent_initial_state']))
+            outcome_dist = sum(c1 != c2 for c1, c2 in zip(target_state, data['most_frequent_outcome_state']))
+
+            # Normalize distance (max distance is 2 for 2-bit strings)
+            initial_similarity = 1.0 - (initial_dist / 2.0)
+            outcome_similarity = 1.0 - (outcome_dist / 2.0)
+
+            # Score = combination of similarity and proven utility
+            similarity_score = (initial_similarity * 0.4 + outcome_similarity * 0.6)
+            final_score = similarity_score * data.get('utility', 0.0)
+
+            if final_score > self.internal_state_parameters['analogical_planning_similarity_threshold']:
+                 candidates.append({'seq': list(seq_tuple), 'score': final_score, 'data': data})
+
+        if not candidates:
+            exec_thought_log.append("    AnalogicalPlanning: No suitable analogous sequences found in LTM.")
+            self._log_lot_event("reasoning.analogical_planning.fail", {"reason": "no_candidates_above_threshold"})
+            return None
+
+        # Select best candidate
+        candidates.sort(key=lambda x: x['score'], reverse=True)
+        best_analogous_solution = candidates[0]
+        chosen_seq = best_analogous_solution['seq']
+        projected_cost = sum(self.operation_costs.get(op[0].upper(), 0.05) for op in chosen_seq)
+
+        if self.objective_reduction_potential + projected_cost >= self.E_OR_THRESHOLD:
+            exec_thought_log.append(f"    AnalogicalPlanning: Best candidate seq {chosen_seq} too costly (cost: {projected_cost:.2f}). Skipped.")
+            self._log_lot_event("reasoning.analogical_planning.fail", {"reason": "best_candidate_too_costly", "cost": projected_cost})
+            return None
+
+        exec_thought_log.append(f"    AnalogicalPlanning: Found analogous seq {chosen_seq} with score {best_analogous_solution['score']:.3f}. Applying it.")
+        self._log_lot_event("reasoning.analogical_planning.success", {"chosen_seq": str(chosen_seq), "score": best_analogous_solution['score']})
+
+        # Future enhancement: adapt the sequence here instead of just replaying it.
+        # For now, we will just return the sequence as-is.
+        return chosen_seq
+
+
+    def _advanced_planning_breakdown_goal_hierarchically(self, parent_goal, parent_step_idx, exec_thought_log):
+        """
+        Dynamically inserts a sub-goal into the current goal plan to reach a landmark state first.
+
+        Args:
+            parent_goal (GoalState): The current, active goal object.
+            parent_step_idx (int): The index of the step within the parent goal that needs breaking down.
+            exec_thought_log (list): The log to append thoughts to.
+
+        Returns:
+            bool: True if a breakdown was successfully performed, False otherwise.
+        """
+        if not (0 <= parent_step_idx < len(parent_goal.steps)):
+            return False
+
+        current_step_obj = parent_goal.steps[parent_step_idx]
+        if current_step_obj.get("sub_goal"): # Already has a sub-goal, don't overwrite
+            return False
+
+        target_state = current_step_obj.get("target_state")
+        current_state = self.collapsed_logical_state_str
+
+        if not target_state or target_state == current_state:
+            return False
+
+        self._log_lot_event("reasoning.hierarchical_planning.start", {"current_state": current_state, "target_state": target_state, "goal_step": current_step_obj.get('name')})
+
+        # --- Simple Landmark Finding for 2-bit space: Find state 1 step away ---
+        # A more advanced version would query LTM for "hub" states.
+        hamm_dist = sum(c1 != c2 for c1, c2 in zip(current_state, target_state))
+        landmark_state = None
+        if hamm_dist > 1:
+            # Find a state that is Hamming distance 1 from current and 1 from target (if possible)
+            for i in range(len(current_state)):
+                # Flip one bit of current_state
+                temp_list = list(current_state)
+                temp_list[i] = '1' if temp_list[i] == '0' else '0'
+                potential_landmark = "".join(temp_list)
+
+                # Check its distance to target
+                landmark_to_target_dist = sum(c1 != c2 for c1, c2 in zip(potential_landmark, target_state))
+                if landmark_to_target_dist < hamm_dist:
+                    landmark_state = potential_landmark
+                    break # Found a good enough one
+
+        if not landmark_state:
+            exec_thought_log.append("  HierarchicalPlanning: Could not determine a useful landmark state.")
+            self._log_lot_event("reasoning.hierarchical_planning.fail", {"reason": "no_landmark_found"})
+            return False
+
+        exec_thought_log.append(f"  HierarchicalPlanning: Breaking down step '{current_step_obj['name']}'. New landmark: |{landmark_state}>.")
+        self._log_lot_event("reasoning.hierarchical_planning.success", {"landmark_state": landmark_state})
+
+        # Create the sub-goal object
+        sub_goal_step1 = {
+            "name": f"Sub-goal: Reach landmark |{landmark_state}>",
+            "target_state": landmark_state,
+            "max_cycles_on_step": 5 # Give sub-goals a timeout
+        }
+        # The original goal step becomes the second step of the sub-goal
+        original_step_as_sub_step2 = copy.deepcopy(current_step_obj)
+        original_step_as_sub_step2['name'] = f"Sub-goal: Final step to |{target_state}>"
+
+        sub_goal = GoalState(
+            current_goal=f"Sub-goal for '{current_step_obj.get('name')}'",
+            steps=[sub_goal_step1, original_step_as_sub_step2]
+        )
+
+        # IMPORTANT: We replace the original complex step with a simpler one that just holds the sub-goal.
+        # This prevents infinite recursion.
+        new_parent_step = {
+            "name": f"Execute Sub-Goal for {target_state}",
+            "sub_goal": sub_goal
+            # The completion of THIS step is now tied to the sub-goal's completion.
+        }
+
+        # Modify the parent goal's step list IN-PLACE
+        parent_goal.steps[parent_step_idx] = new_parent_step
+        parent_goal.history.append({
+            "cycle": self.current_cycle_num,
+            "event": "hierarchical_breakdown",
+            "step_name": current_step_obj.get('name'),
+            "new_sub_goal": sub_goal.current_goal
+        })
+
+        # We don't return ops. The goal update logic in the main loop will activate the new sub-goal.
+        return True
+
+
 
 
     def _executive_plan_next_target_input(self, current_outcome_str, executive_eval_results, exec_thought_log):
