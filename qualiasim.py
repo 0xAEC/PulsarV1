@@ -5,16 +5,75 @@ import random
 import collections 
 import traceback 
 import math 
+from typing import NamedTuple
+
+# ---------------------------------------------------------------------------
+# State Abstraction Layer (The "Soul" That Can Inhabit Any "Body")
+# ---------------------------------------------------------------------------
+class StateHandle(NamedTuple):
+    """
+    An abstract, hashable handle for a state in the universe.
+    The agent's cognitive logic should operate on these handles, not on
+    their underlying string representations, allowing the cognitive architecture
+    to be independent of the specific problem space (e.g., bitstrings, colors, etc.).
+    """
+    id: str
+
+    def __str__(self) -> str:
+        # A more user-friendly representation for printing and logging.
+        return f"State({self.id})"
+
+    def __repr__(self) -> str:
+        # The formal representation, good for debugging.
+        return f"StateHandle(id='{self.id}')"
+
+# A sample Universe Configuration representing the original hardcoded behavior
+COMPUTATIONAL_UNIVERSE = {
+    "name": "2-Qubit Computational Basis",
+    "states": [StateHandle('00'), StateHandle('01'), StateHandle('10'), StateHandle('11')],
+    "state_to_comp_basis": {
+        StateHandle('00'): '00', StateHandle('01'): '01',
+        StateHandle('10'): '10', StateHandle('11'): '11'
+    },
+    "comp_basis_to_state": {
+        '00': StateHandle('00'), '01': StateHandle('01'),
+        '10': StateHandle('10'), '11': StateHandle('11')
+    },
+    "valence_map": {
+        StateHandle('00'): 0.0, StateHandle('01'): 0.5,
+        StateHandle('10'): -0.5, StateHandle('11'): 1.0
+    },
+    "start_state": StateHandle('00')
+}
+
+# An example of an alternative universe the agent could inhabit without code changes
+COLOR_UNIVERSE = {
+    "name": "Simple Color World",
+    "states": [StateHandle('RED'), StateHandle('GREEN'), StateHandle('BLUE'), StateHandle('YELLOW')],
+    "state_to_comp_basis": {
+        StateHandle('RED'):    '00', StateHandle('GREEN'):  '01',
+        StateHandle('BLUE'):   '10', StateHandle('YELLOW'): '11'
+    },
+    "comp_basis_to_state": {
+        '00': StateHandle('RED'),    '01': StateHandle('GREEN'),
+        '10': StateHandle('BLUE'),   '11': StateHandle('YELLOW')
+    },
+    "valence_map": {
+        StateHandle('RED'):   -0.8, StateHandle('GREEN'):  1.0,
+        StateHandle('BLUE'):  -0.2, StateHandle('YELLOW'): 0.3
+    },
+    "start_state": StateHandle('RED')
+}
 
 # ---------------------------------------------------------------------------
 # Orch OR Emulator & System Defaults
 # ---------------------------------------------------------------------------
-# REMINDER LINE 1237 don't forget to implement it b4 the deadline or i will cook ur crooked ass
 
 ### NEW VERSION ###
 DEFAULT_INTERNAL_PARAMS = {
     'curiosity': 0.5, 'goal_seeking_bias': 0.3,
-    'preferred_logical_state': None,  # Target state for problem-solving/goal-seeking
+    'preferred_logical_state': None,  # DEPRECATED, use preferred_state_handle. Retained for potential compatibility checks.
+    'preferred_state_handle': None,   # Target state for problem-solving/goal-seeking, now a StateHandle
     'computation_length_preference': 3, # Avg number of ops agent tries to execute
     'attention_level': 1.0, 'cognitive_load': 0.0, 'mood': 0.0, 'frustration': 0.0,
     'exploration_mode_countdown': 0, # Cycles remaining in exploration mode
@@ -50,7 +109,7 @@ DEFAULT_INTERNAL_PARAMS = {
     'ltm_initial_state_match_bonus': 0.10, # Bonus if LTM sequence starts from current agent state
     'ltm_input_context_match_bonus': 0.05, # Bonus if LTM sequence was learned for similar input context
     # ADV_REASONING_FEATURE_1: Conceptual Layer
-    'concept_logical_state_map': {},  # E.g., {'HAPPY_PLACE': '11', 'TOOL_FOUND': '01'}
+    'concept_state_handle_map': {},  # E.g., {'HAPPY_PLACE': StateHandle('11'), 'TOOL_FOUND': StateHandle('01')}
     'ltm_active_concept_match_bonus': 0.12, # Bonus if LTM sequence active concepts match current concepts
     'clear_active_concepts_each_cycle': True, # If true, concepts are based purely on current collapsed state. If false, they persist until changed.
     'enable_counterfactual_simulation': True,
@@ -204,8 +263,13 @@ DEFAULT_LOT_CONFIG = {
 # ---------------------------------------------------------------------------
 # GoalState Structure (for Feature 7)
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# GoalState Structure (for Feature 7)
+# ---------------------------------------------------------------------------
 class GoalState:
     def __init__(self, current_goal, steps, error_tolerance=0.05, initial_progress=0.0):
+        # The 'current_goal' is a high-level description or a target StateHandle itself.
+        # Step 'target_state' values should be StateHandle objects.
         self.current_goal = current_goal
         self.steps = steps # List of step dictionaries
         self.progress = initial_progress
@@ -221,13 +285,17 @@ class GoalState:
             s_copy = step.copy()
             if callable(s_copy.get("completion_criteria")):
                 s_copy["completion_criteria"] = "callable_function_not_serialized"
+            if isinstance(s_copy.get("target_state"), StateHandle):
+                 s_copy["target_state"] = repr(s_copy["target_state"]) # Serialize StateHandle to string
             # If a step itself is a GoalState, recursively serialize
             if isinstance(s_copy.get("sub_goal"), GoalState):
                  s_copy["sub_goal"] = s_copy["sub_goal"].to_dict()
             serializable_steps.append(s_copy)
+        
+        goal_desc = repr(self.current_goal) if isinstance(self.current_goal, StateHandle) else str(self.current_goal)
 
         return {
-            "current_goal": self.current_goal,
+            "current_goal": goal_desc,
             "steps": serializable_steps,
             "progress": self.progress,
             "error_tolerance": self.error_tolerance,
@@ -245,19 +313,27 @@ class GoalState:
             step_name_display = "None"
             if 0 <= goal.current_step_index < len(goal.steps):
                 current_step = goal.steps[goal.current_step_index]
-                step_name_display = current_step.get("name", f"Step {goal.current_step_index+1}")
+                # Default display uses the step 'name', or target StateHandle if name is not present.
+                step_name = current_step.get("name")
+                if not step_name:
+                    target = current_step.get("target_state")
+                    step_name = str(target) if target else f"Step {goal.current_step_index+1}"
+                step_name_display = step_name
+
                 sub_goal = current_step.get("sub_goal")
                 if isinstance(sub_goal, GoalState) and sub_goal.status == "active":
+                    sub_goal_desc = sub_goal.current_goal if not isinstance(sub_goal.current_goal, StateHandle) else str(sub_goal.current_goal)
                     sub_goal_display = get_step_display(sub_goal, depth + 1)
-                    return f"{step_name_display} -> (SubGoal: '{sub_goal.current_goal}', Step: '{sub_goal_display}')"
+                    return f"{step_name_display} -> (SubGoal: '{sub_goal_desc}', Step: '{sub_goal_display}')"
             return step_name_display
-
+        
+        goal_desc_str = self.current_goal if not isinstance(self.current_goal, StateHandle) else str(self.current_goal)
         final_step_display = get_step_display(self)
-        return f"Goal: '{self.current_goal}' (Step: '{final_step_display}', Progress: {self.progress*100:.1f}%, Status: {self.status})"
+        return f"Goal: '{goal_desc_str}' (Step: '{final_step_display}', Progress: {self.progress*100:.1f}%, Status: {self.status})"
 
 
 # -----------------------------------------------------------------------------------------------
-# Working Memory Components (NEW FEATURE) | added on 6/3/2025 6:39 PM for coordination -- E90XAEC
+# Working Memory Components 
 # -----------------------------------------------------------------------------------------------
 class WorkingMemoryItem:
     def __init__(self, type: str, data: dict, description: str = ""):
@@ -328,8 +404,12 @@ class WorkingMemoryStack:
 # ---------------------------------------------------------------------------
 # Class Definition: SimplifiedOrchOREmulator
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Class Definition: SimplifiedOrchOREmulator
+# ---------------------------------------------------------------------------
 class SimplifiedOrchOREmulator:
     def __init__(self, agent_id="agent0", cycle_history_max_len=100,
+                 universe=None,  # NEW: Universe configuration object/dict
                  initial_E_OR_THRESHOLD=1.0, initial_orp_decay_rate=0.01,
                  initial_internal_states=None, metacognition_config=None,
                  orp_threshold_dynamics_config=None, orp_decay_dynamics_config=None,
@@ -343,26 +423,43 @@ class SimplifiedOrchOREmulator:
                  lot_config=None,
                  shared_long_term_memory=None,
                  shared_attention_foci=None,
-                 working_memory_max_depth=20, # NEW PARAM
+                 working_memory_max_depth=20,
                  config_overrides=None,
                  verbose=0):
 
         self.agent_id = agent_id
         self.verbose = verbose
 
-        self.logical_superposition = {"00": 1.0 + 0j, "01":0j, "10":0j, "11":0j}
-        self.collapsed_logical_state_str = "00"
+        # NEW: Universe-specific configuration
+        self.universe = universe if universe is not None else COMPUTATIONAL_UNIVERSE
+        start_comp_basis = self.universe['state_to_comp_basis'][self.universe['start_state']]
+
+        # Core computational state remains in the string basis
+        self.logical_superposition = {"00": 0j, "01": 0j, "10": 0j, "11": 0j}
+        self.logical_superposition[start_comp_basis] = 1.0 + 0j
+        self.collapsed_computational_state_str = start_comp_basis
+        self.current_conceptual_state = self.universe['start_state'] # State in agent's 'reality'
+
         self.objective_reduction_potential = 0.0
         self.E_OR_THRESHOLD = initial_E_OR_THRESHOLD
         self.orp_decay_rate = initial_orp_decay_rate
 
         self.operation_costs = {'X': 0.1, 'Z': 0.1, 'H': 0.3, 'CNOT': 0.4, 'CZ': 0.4, 'ERROR_PENALTY': 0.05, 'PLANNING_BASE': 0.02}
-        self.outcome_valence_map = {"00": 0.0, "01": 0.5, "10": -0.5, "11": 1.0}
+        # REMOVED: self.outcome_valence_map = {"00": 0.0, "01": 0.5, "10": -0.5, "11": 1.0}
         self.last_cycle_valence_raw = 0.0
         self.last_cycle_valence_mod = 0.0
         self.current_orp_before_reset = 0.0
 
         self.internal_state_parameters = copy.deepcopy(DEFAULT_INTERNAL_PARAMS)
+        # Handle string-based preferred state from old configs for compatibility.
+        if initial_internal_states and initial_internal_states.get('preferred_logical_state'):
+             try:
+                 handle = self.universe['comp_basis_to_state'][initial_internal_states['preferred_logical_state']]
+                 initial_internal_states['preferred_state_handle'] = handle
+                 del initial_internal_states['preferred_logical_state'] # Remove old key
+             except KeyError:
+                 if self.verbose >=1: print(f"Warning: Could not convert old 'preferred_logical_state' string to a StateHandle.")
+
         if initial_internal_states: self.internal_state_parameters.update(initial_internal_states)
 
         self.metacognition_params = copy.deepcopy(DEFAULT_METACOGNITION_PARAMS)
@@ -437,11 +534,11 @@ class SimplifiedOrchOREmulator:
 
         self.cycle_history = collections.deque(maxlen=cycle_history_max_len)
         self.current_cycle_num = 0
-        self.next_target_input_state = "00"
+        self.next_target_input_state_handle = self.universe['start_state']
 
         if self.verbose >= 1:
             active_features_list = ["TemporalGrid", f"SMN(Graph:{self.smn_config.get('enable_influence_matrix', False)})", "Interrupts", "Firewall", "Goals", "LoT", "WorkingMemory"]
-            print(f"[{self.agent_id}] Orch-OR Emulator Initialized. Active Features: {', '.join(active_features_list)}.")
+            print(f"[{self.agent_id}] Orch-OR Emulator Initialized. Universe: '{self.universe['name']}'. Active Features: {', '.join(active_features_list)}.")
             print(f"[{self.agent_id}] E_OR_THRESHOLD: {self.E_OR_THRESHOLD:.2f}, ORP Decay Rate: {self.orp_decay_rate:.3f}, WM Depth: {self.working_memory.stack.maxlen}")
             if self.temporal_grid_params.get('max_len',0) > 0:
                 print(f"[{self.agent_id}] Temporal Feedback Grid: Active (maxlen={self.temporal_grid_params['max_len']}, window={self.temporal_grid_params['feedback_window']})")
@@ -823,27 +920,37 @@ class SimplifiedOrchOREmulator:
                                                             "all_active_now": list(self.active_concepts)})
 
     # --- Layer 1: Sensor Layer ---
-    def _sensor_layer_process_input(self, target_classical_input_str: str) -> str:
-        if self.verbose >= 2: print(f"  SENSOR_LAYER: Processing target input '{target_classical_input_str}'.")
-        self._log_lot_event("sensor.process_input.start", {"target_input": target_classical_input_str})
+    def _sensor_layer_process_input(self, target_conceptual_input: StateHandle) -> tuple[str, StateHandle]:
+        if self.verbose >= 2: print(f"  SENSOR_LAYER: Processing target conceptual input '{target_conceptual_input}'.")
+        self._log_lot_event("sensor.process_input.start", {"target_input_conceptual": str(target_conceptual_input)})
+
+        target_classical_input_str = self.universe['state_to_comp_basis'].get(target_conceptual_input)
+        if target_classical_input_str is None:
+             if self.verbose >= 1: print(f"    SENSOR_LAYER: Warning - could not find conceptual input {target_conceptual_input} in universe map. Defaulting to basis '00'.")
+             target_classical_input_str = self.universe['state_to_comp_basis'][self.universe['start_state']]
+
 
         noise_level = self.internal_state_parameters.get('sensor_input_noise_level', 0.0)
         actual_classical_input_str = target_classical_input_str
+        actual_conceptual_state = target_conceptual_input # Default to no noise
 
-        if noise_level > 0 and random.random() < 0.75 :
+        if noise_level > 0 and random.random() < 0.75:
             mutated_input_list = list(target_classical_input_str)
             num_flips = 0
             for i in range(len(mutated_input_list)):
                 if random.random() < noise_level:
                     mutated_input_list[i] = '1' if mutated_input_list[i] == '0' else '0'
                     num_flips +=1
+
             if num_flips > 0:
                 actual_classical_input_str = "".join(mutated_input_list)
-                if self.verbose >= 1: print(f"    SENSOR_LAYER: Input '{target_classical_input_str}' perceived as '{actual_classical_input_str}' due to noise.")
-                self._log_lot_event("sensor.process_input.noise_applied", {"original": target_classical_input_str, "actual": actual_classical_input_str, "noise_level": noise_level, "flips":num_flips})
+                # The corresponding conceptual state
+                actual_conceptual_state = self.universe['comp_basis_to_state'].get(actual_classical_input_str, self.universe['start_state'])
+                if self.verbose >= 1: print(f"    SENSOR_LAYER: Input '{target_conceptual_input}' (basis |{target_classical_input_str}>) perceived as {actual_conceptual_state} (basis |{actual_classical_input_str}>) due to noise.")
+                self._log_lot_event("sensor.process_input.noise_applied", {"original": str(target_conceptual_input), "original_comp_basis": target_classical_input_str, "actual_comp_basis": actual_classical_input_str, "actual_conceptual": str(actual_conceptual_state), "noise_level": noise_level, "flips":num_flips})
 
-        self._log_lot_event("sensor.process_input.end", {"actual_input": actual_classical_input_str})
-        return actual_classical_input_str
+        self._log_lot_event("sensor.process_input.end", {"actual_input_computational": actual_classical_input_str, "actual_input_conceptual": str(actual_conceptual_state)})
+        return actual_classical_input_str, actual_conceptual_state
 
     # --- Layer 2: Associative Layer ---
 ### NEW VERSION ###
@@ -1183,7 +1290,7 @@ class SimplifiedOrchOREmulator:
         if self.verbose >= 2: print(f"  EXECUTIVE_LAYER.Outcome_Eval: |{logical_outcome_str}>, ORP={orp_at_collapse:.3f}, Ent={entropy_at_collapse:.2f}, Ops#={num_ops_executed_this_cycle}")
         acc_thoughts_log = []
 
-        raw_valence = self.outcome_valence_map.get(logical_outcome_str, -0.15)
+        raw_valence = self.universe['valence_map'].get(logical_outcome_str, -0.15)
         mod_valence = raw_valence # Initialize mod_valence with raw_valence
 
         # --- MODIFIED for Demo 5, Fix 3: Stabilize Post-Goal Valence (Check Lock) ---
@@ -1357,8 +1464,8 @@ class SimplifiedOrchOREmulator:
                     wm_top_item_for_goal_ctx = self.working_memory.peek()
                     if wm_top_item_for_goal_ctx and wm_top_item_for_goal_ctx.type == "goal_step_context" and \
                        wm_top_item_for_goal_ctx.data.get("goal_name") == current_processing_goal.current_goal and \
-                       wm_top_item_for_goal_ctx.data.get("step_index") == current_processing_goal.current_step_index and \
-                       wm_top_item_for_goal_ctx.data.get("goal_step_name") == active_goal_step_name:
+                       wm_top_item_for_goal_ctx.data.get("goal_step_name") == active_goal_step_name and \
+                       wm_top_item_for_goal_ctx.data.get("step_index") == current_processing_goal.current_step_index:
                         is_goal_context_from_wm = True
                         exec_thought_log.append(f"  WM Active GoalContext: Matched Goal '{current_processing_goal.current_goal}' - Step '{active_goal_step_name}'.")
                         self._log_lot_event("executive.opgen.wm_match_goal", {"goal":current_processing_goal.current_goal, "step":active_goal_step_name})
@@ -1435,7 +1542,7 @@ class SimplifiedOrchOREmulator:
         if selected_strategy == 'memory':
             replay_ops, _ = self._associative_layer_recall_from_ltm_strategy(
                 simulated_orp_accumulator, exec_thought_log, 
-                self.collapsed_logical_state_str, self.next_target_input_state
+                self.current_conceptual_state, self.next_target_input_state_handle
             )
             if replay_ops:
                 ops_sequence = replay_ops
@@ -1443,19 +1550,37 @@ class SimplifiedOrchOREmulator:
 
         if not ops_sequence and selected_strategy == 'problem_solve':
             # This is simplified. Your logic can be more complex.
-            pref_state = self.internal_state_parameters['preferred_logical_state']
-            if pref_state and pref_state != self.collapsed_logical_state_str:
-                exec_thought_log.append(f"  ProblemSolving towards |{pref_state}>.")
-                # Basic planning logic to flip bits towards the preferred state.
-                target_bits = list(map(int, pref_state))
-                current_bits = list(map(int, self.collapsed_logical_state_str))
-                planned_ops = []
-                # Bit 0 is qubit 1, bit 1 is qubit 0 in your '10' notation.
-                if current_bits[1] != target_bits[1]: planned_ops.append(['X', 0])
-                if current_bits[0] != target_bits[0]: planned_ops.append(['X', 1])
-                ops_sequence = planned_ops
-                chosen_strategy_name = "StrategyProblemSolving"
-                was_novel_sequence = True
+            pref_state_handle = self.internal_state_parameters.get('preferred_state_handle')
+            
+            # Use the conceptual handle, then find its string representation
+            if pref_state_handle and pref_state_handle != self.current_conceptual_state:
+                
+                pref_state_str = self.universe['state_to_comp_basis'].get(pref_state_handle)
+                current_state_str = self.collapsed_computational_state_str
+
+                if pref_state_str is not None:
+                    exec_thought_log.append(f"  ProblemSolving towards {pref_state_handle} (basis |{pref_state_str}>).")
+                    
+                    # Ensure both are valid 2-bit strings before proceeding
+                    if len(pref_state_str) == 2 and len(current_state_str) == 2:
+                        target_bits = list(map(int, pref_state_str))
+                        current_bits = list(map(int, current_state_str))
+                        planned_ops = []
+                        
+                        # Correct Logic: bit 0 maps to qubit 1, bit 1 maps to qubit 0
+                        # Example: state '10' is |q1, q0>
+                        # If current bit at index 0 ('1' in '10') != target bit at index 0
+                        # then we need to flip qubit 1.
+                        if current_bits[0] != target_bits[0]:
+                            planned_ops.append(['X', 1])
+                        # If current bit at index 1 ('0' in '10') != target bit at index 1
+                        # then we need to flip qubit 0.
+                        if current_bits[1] != target_bits[1]:
+                            planned_ops.append(['X', 0])
+                            
+                        ops_sequence = planned_ops
+                        chosen_strategy_name = "StrategyProblemSolving"
+                        was_novel_sequence = True
 
         if not ops_sequence: # Fallback to goal-seek or curiosity loop
             # Your original op-generation loop remains a good fallback.
@@ -1481,7 +1606,7 @@ class SimplifiedOrchOREmulator:
             # 1. Try Analogical Planning first
             if self.internal_state_parameters.get('enable_analogical_planning', True):
                 advanced_planning_ops = self._advanced_planning_find_analogous_solution(
-                    active_goal_step_info, self.collapsed_logical_state_str, exec_thought_log
+                    active_goal_step_info, self.collapsed_computational_state_str, exec_thought_log
                 )
                 if advanced_planning_ops:
                     adv_strategy_name = "StrategyAnalogicalPlanning"
@@ -1557,7 +1682,7 @@ class SimplifiedOrchOREmulator:
             # Normalize probabilities just in case of float inaccuracies
             prob_sum = sum(probabilities.values())
             if prob_sum > 1e-9:
-                estimated_valence = sum(self.outcome_valence_map.get(state, 0.0) * (prob / prob_sum) for state, prob in probabilities.items())
+                                estimated_valence = sum(self.universe['valence_map'].get(self.universe['comp_basis_to_state'].get(state), 0.0) * (prob / prob_sum) for state, prob in probabilities.items())
             else:
                 estimated_valence = -1.0 # Invalid superposition state
 
@@ -1649,7 +1774,7 @@ class SimplifiedOrchOREmulator:
             return False
 
         target_state = current_step_obj.get("target_state")
-        current_state = self.collapsed_logical_state_str
+        current_state = self.collapsed_computational_state_str
 
         if not target_state or target_state == current_state:
             return False
@@ -1711,57 +1836,62 @@ class SimplifiedOrchOREmulator:
 
 
 
-    def _executive_plan_next_target_input(self, current_outcome_str, executive_eval_results, exec_thought_log):
-        exec_thought_log.append(f"PlanNextInput based on |{current_outcome_str}> (mood {executive_eval_results['mood']:.2f}):")
+    def _executive_plan_next_target_input(self, current_outcome_handle, executive_eval_results, exec_thought_log):
+        exec_thought_log.append(f"PlanNextInput based on {current_outcome_handle} (mood {executive_eval_results['mood']:.2f}):")
 
-        base_next_input_map = {"00":"01", "01":"10", "10":"11", "11":"00"}
-        next_input = base_next_input_map.get(current_outcome_str, "00")
-        exec_thought_log.append(f"  Base heuristic next input: |{next_input}>.")
+        # Heuristic: cycle through states. This logic is universe-dependent and should
+        # ideally be part of the universe config, but is kept here for simplicity.
+        all_states = self.universe['states']
+        try:
+            current_index = all_states.index(current_outcome_handle)
+            next_index = (current_index + 1) % len(all_states)
+            next_handle = all_states[next_index]
+        except (ValueError, IndexError):
+            next_handle = self.universe['start_state']
+        exec_thought_log.append(f"  Base heuristic next input: {next_handle}.")
 
         if self.current_goal_state_obj and self.current_goal_state_obj.status == "active":
             current_step_idx = self.current_goal_state_obj.current_step_index
             if 0 <= current_step_idx < len(self.current_goal_state_obj.steps):
                 step_info = self.current_goal_state_obj.steps[current_step_idx]
-                if step_info.get("next_input_for_world"):
-                    next_input = step_info["next_input_for_world"]
-                    exec_thought_log.append(f"  GoalStep '{step_info.get('name')}' overrides next input to |{next_input}>.")
-                    self._log_lot_event("executive.plannext.goal_override", {"next_input": next_input, "goal_step_name":step_info.get('name',"")})
+                # Goal step can specify the next conceptual input for the world
+                if isinstance(step_info.get("next_input_for_world"), StateHandle):
+                    next_handle = step_info["next_input_for_world"]
+                    exec_thought_log.append(f"  GoalStep '{step_info.get('name')}' overrides next input to {next_handle}.")
+                    self._log_lot_event("executive.plannext.goal_override", {"next_input": str(next_handle), "goal_step_name":step_info.get('name',"")})
 
-        elif self.internal_state_parameters['preferred_logical_state'] and \
-           self.internal_state_parameters['preferred_logical_state'] != next_input and \
+        elif self.internal_state_parameters['preferred_state_handle'] and \
+           self.internal_state_parameters['preferred_state_handle'] != next_handle and \
            random.random() < self.internal_state_parameters['goal_seeking_bias'] * 0.75:
-            next_input = self.internal_state_parameters['preferred_logical_state']
-            exec_thought_log.append(f"  Overridden by PreferredStateBias (bias {self.internal_state_parameters['goal_seeking_bias']:.2f}): next input |{next_input}>.")
-            self._log_lot_event("executive.plannext.preferred_state_override", {"next_input": next_input, "bias": self.internal_state_parameters['goal_seeking_bias']})
+            next_handle = self.internal_state_parameters['preferred_state_handle']
+            exec_thought_log.append(f"  Overridden by PreferredStateBias (bias {self.internal_state_parameters['goal_seeking_bias']:.2f}): next input {next_handle}.")
+            self._log_lot_event("executive.plannext.preferred_state_override", {"next_input": str(next_handle), "bias": self.internal_state_parameters['goal_seeking_bias']})
 
         elif executive_eval_results['exploration_countdown'] > 0 or \
              (executive_eval_results['mood'] < -0.65 and random.random() < 0.55):
-            available_inputs = list(base_next_input_map.keys())
-            if current_outcome_str in available_inputs: available_inputs.remove(str(current_outcome_str))
-            if str(next_input) in available_inputs: available_inputs.remove(str(next_input))
+            available_inputs = list(self.universe['states'])
+            if current_outcome_handle in available_inputs: available_inputs.remove(current_outcome_handle)
+            if next_handle in available_inputs: available_inputs.remove(next_handle)
 
             if available_inputs:
-                next_input = random.choice(available_inputs)
-                exec_thought_log.append(f"  Exploration/Mood (mood {executive_eval_results['mood']:.2f}, exp T-{executive_eval_results['exploration_countdown']}) override: next input |{next_input}>.")
-                self._log_lot_event("executive.plannext.exploration_override", {"next_input": next_input, "mood":executive_eval_results['mood']})
-            else:
-                next_input = base_next_input_map.get(current_outcome_str, "00")
-                exec_thought_log.append(f"  Exploration override failed (no other states avail), using default |{next_input}>.")
+                next_handle = random.choice(available_inputs)
+                exec_thought_log.append(f"  Exploration/Mood (mood {executive_eval_results['mood']:.2f}, exp T-{executive_eval_results['exploration_countdown']}) override: next input {next_handle}.")
+                self._log_lot_event("executive.plannext.exploration_override", {"next_input": str(next_handle), "mood":executive_eval_results['mood']})
+            # else, keep the heuristic choice
 
         elif executive_eval_results['mood'] > 0.75 and random.random() < 0.40 and self.cycle_history:
-            last_actual_input = self.cycle_history[-1]['actual_input_state_used']
-            if last_actual_input and last_actual_input != current_outcome_str :
-                next_input = last_actual_input
-                exec_thought_log.append(f"  Good mood ({executive_eval_results['mood']:.2f}), repeating last input context |{last_actual_input}>.")
-                self._log_lot_event("executive.plannext.good_mood_repeat", {"next_input": next_input, "mood":executive_eval_results['mood']})
+            last_actual_input_handle = self.cycle_history[-1]['actual_input_state_handle']
+            if last_actual_input_handle and last_actual_input_handle != current_outcome_handle :
+                next_handle = last_actual_input_handle
+                exec_thought_log.append(f"  Good mood ({executive_eval_results['mood']:.2f}), repeating last input context {last_actual_input_handle}.")
+                self._log_lot_event("executive.plannext.good_mood_repeat", {"next_input": str(next_handle), "mood":executive_eval_results['mood']})
 
-        final_next_input_str = str(next_input)
-        exec_thought_log.append(f"  Final proposed next input: |{final_next_input_str}>.")
-        self.next_target_input_state = final_next_input_str
-        return final_next_input_str
+        exec_thought_log.append(f"  Final proposed next input: {next_handle}.")
+        self.next_target_input_state_handle = next_handle
+        return next_handle
 
 
-    def _executive_update_goal_progress(self, collapsed_outcome_str, executed_ops):
+    def _executive_update_goal_progress(self, collapsed_outcome_handle, executed_ops):
         if not (self.current_goal_state_obj and self.current_goal_state_obj.status == "active"):
             return
 
@@ -1787,7 +1917,7 @@ class SimplifiedOrchOREmulator:
 
         current_step = goal.steps[step_idx]
         step_name = current_step.get("name", f"Step {step_idx + 1}")
-        self._log_lot_event("executive.goalprogress.check", {"goal_name": goal.current_goal, "step_name": step_name, "step_idx":step_idx, "outcome_state":collapsed_outcome_str})
+        self._log_lot_event("executive.goalprogress.check", {"goal_name": goal.current_goal, "step_name": step_name, "step_idx":step_idx, "outcome_state": str(collapsed_outcome_handle)})
 
         # --- MODIFIED WM PUSH LOGIC for Demo 3, Fix 2 ---
         if current_step.get("requires_explicit_wm_context_push", False):
@@ -1811,7 +1941,7 @@ class SimplifiedOrchOREmulator:
                     "goal_name": goal.current_goal, 
                     "goal_step_name": step_name, 
                     "step_index": step_idx,
-                    "collapsed_state_at_eval_time": self.collapsed_logical_state_str,
+                    "collapsed_state_at_eval_time": self.collapsed_computational_state_str,
                     # "cycle_num_pushed_for_eval": self.current_cycle_num # Optional: keep for detailed debug if needed
                 }
                 item_to_push = WorkingMemoryItem(type="goal_step_context", data=wm_item_data, 
@@ -1841,13 +1971,13 @@ class SimplifiedOrchOREmulator:
                  if self.verbose >=1: print(f"[{self.agent_id}] SubGoal '{sub_goal_obj.current_goal}' previously failed for step '{step_name}'. Step fails for parent.")
                  goal.history.append({"cycle": self.current_cycle_num, "event": f"step_failed_due_to_subgoal", "step_name": step_name, "subgoal_name": sub_goal_obj.current_goal, "current_step_index_at_event": goal.current_step_index})
 
-        if not achieved_step and current_step.get("target_state") and collapsed_outcome_str == current_step["target_state"]:
+        if not achieved_step and current_step.get("target_state") and collapsed_outcome_handle == current_step["target_state"]:
             achieved_step = True
-            if self.verbose >=1: print(f"[{self.agent_id}] Goal '{goal.current_goal}': Step '{step_name}' achieved via target state |{collapsed_outcome_str}>.")
+            if self.verbose >=1: print(f"[{self.agent_id}] Goal '{goal.current_goal}': Step '{step_name}' achieved via target state {collapsed_outcome_handle}.")
         elif not achieved_step and callable(current_step.get("completion_criteria")):
             try:
                 context_for_callable = {
-                    'collapsed_state': collapsed_outcome_str, 
+                    'collapsed_state': collapsed_outcome_handle, # Pass the handle
                     'ops': executed_ops, 
                     'agent_public_state': self.get_public_state_summary(), 
                     'working_memory': self.working_memory, 
@@ -1863,7 +1993,7 @@ class SimplifiedOrchOREmulator:
         
         pop_reason_details = ""
         if achieved_step:
-            goal.history.append({"cycle": self.current_cycle_num, "event": f"step_completed", "step_name": step_name, "outcome_state":collapsed_outcome_str, "current_step_index_at_event": goal.current_step_index})
+            goal.history.append({"cycle": self.current_cycle_num, "event": f"step_completed", "step_name": step_name, "outcome_state":str(collapsed_outcome_handle), "current_step_index_at_event": goal.current_step_index})
             self.last_cycle_valence_mod = np.clip(self.last_cycle_valence_mod + self.goal_state_config_params['step_completion_valence_bonus'], -1.0, 1.0)
             goal.current_step_index += 1 
             num_steps = len(goal.steps)
@@ -1885,14 +2015,14 @@ class SimplifiedOrchOREmulator:
                         "lock_value": self.post_goal_valence_lock_value
                     })
 
-                if self.internal_state_parameters['preferred_logical_state'] == current_step.get("target_state"): 
-                    self.internal_state_parameters['preferred_logical_state'] = None 
+                if self.internal_state_parameters['preferred_state_handle'] == current_step.get("target_state"): 
+                    self.internal_state_parameters['preferred_state_handle'] = None 
             else: 
                  next_step_index_after_advance = goal.current_step_index
                  next_step_name = goal.steps[next_step_index_after_advance].get("name", f"Step {next_step_index_after_advance+1}")
                  if self.verbose >= 1: print(f"[{self.agent_id}] Goal '{goal.current_goal}': Advanced to step '{next_step_name}'.")
         else: 
-            goal.history.append({"cycle": self.current_cycle_num, "event": "step_no_progress", "step_name": step_name, "current_outcome": collapsed_outcome_str, "current_step_index_at_event": goal.current_step_index})
+            goal.history.append({"cycle": self.current_cycle_num, "event": "step_no_progress", "step_name": step_name, "current_outcome": str(collapsed_outcome_handle), "current_step_index_at_event": goal.current_step_index})
             max_cycles_on_step_val = current_step.get("max_cycles_on_step", float('inf'))
             
             cycles_on_this_step_count = 0
@@ -1921,9 +2051,9 @@ class SimplifiedOrchOREmulator:
         
         if goal.status in ["completed", "failed"]:
             final_step_details = current_step 
-            if self.internal_state_parameters['preferred_logical_state'] == final_step_details.get("target_state"):
-                 self.internal_state_parameters['preferred_logical_state'] = None
-                 self._log_lot_event("executive.goalprogress.clear_pref_state_on_goal_end", {"goal_status": goal.status, "related_target_state": final_step_details.get("target_state"), "step_name_involved": final_step_details.get("name")})
+            if self.internal_state_parameters['preferred_state_handle'] == final_step_details.get("target_state"):
+                 self.internal_state_parameters['preferred_state_handle'] = None
+                 self._log_lot_event("executive.goalprogress.clear_pref_state_on_goal_end", {"goal_status": goal.status, "related_target_state": str(final_step_details.get("target_state")), "step_name_involved": final_step_details.get("name")})
 
 
 
@@ -2177,7 +2307,7 @@ class SimplifiedOrchOREmulator:
 
         # --- 2. Data-Driven Adaptation using Self-Model (or Fallback to original logic) ---
         avg_valence_overall = np.mean([c['valence_mod_this_cycle'] for c in valid_cycles])
-        outcome_diversity = len(set(c['collapsed_to'] for c in valid_cycles)) / len(valid_cycles) if valid_cycles else 0.0
+        outcome_diversity = len(set(c['collapsed_to_handle'] for c in valid_cycles)) / len(valid_cycles) if valid_cycles else 0.0
 
         if use_self_model and self_model['total_reviews_for_model'] > 2: # Wait for model to stabilize
             if self.verbose >= 1: print("    META.Review: Applying adaptations based on SELF-MODEL.")
@@ -2520,7 +2650,7 @@ class SimplifiedOrchOREmulator:
             behavior_patterns = []
             for c in history_slice:
                 ops_tuple = tuple(tuple(op) for op in c.get('ops_executed', []))
-                behavior_patterns.append((c['collapsed_to'], c['op_strategy'], ops_tuple))
+                behavior_patterns.append((c['collapsed_to_handle'], c['op_strategy'], ops_tuple))
             
             counts = collections.Counter(behavior_patterns)
             for pattern_tuple, count in counts.items():
@@ -2584,22 +2714,21 @@ class SimplifiedOrchOREmulator:
 
 
     # --- Main Cognitive Cycle Orchestration ---
-    def run_full_cognitive_cycle(self, intended_classical_input_str:str, computation_sequence_ops=None):
+    def run_full_cognitive_cycle(self, intended_conceptual_input:StateHandle, computation_sequence_ops=None):
         self.current_cycle_num += 1
         self.current_cycle_lot_stream = []
         start_time = time.time()
 
-        self._log_lot_event("cycle_start", {"cycle_num":self.current_cycle_num, "intended_input_str": intended_classical_input_str, "agent_id":self.agent_id, "current_mood":self.internal_state_parameters['mood'], "current_orp":self.objective_reduction_potential})
-        if self.verbose >= 1: print(f"\n[{self.agent_id}] ===== Cycle {self.current_cycle_num} | Input: |{intended_classical_input_str}> =====")
+        self._log_lot_event("cycle_start", {"cycle_num":self.current_cycle_num, "intended_input_conceptual": str(intended_conceptual_input), "agent_id":self.agent_id, "current_mood":self.internal_state_parameters['mood'], "current_orp":self.objective_reduction_potential})
+        if self.verbose >= 1: print(f"\n[{self.agent_id}] ===== Cycle {self.current_cycle_num} | Input: {intended_conceptual_input} =====")
 
-        actual_classical_input_str = self._sensor_layer_process_input(intended_classical_input_str)
-        if self.verbose >= 2: print(f"  SensorLayer Out: Actual perceived input |{actual_classical_input_str}> (intended |{intended_classical_input_str}>)")
+        actual_computational_str, actual_conceptual_state = self._sensor_layer_process_input(intended_conceptual_input)
+        if self.verbose >= 2: print(f"  SensorLayer Out: Actual perceived input {actual_conceptual_state} (basis |{actual_computational_str}>) from intended {intended_conceptual_input}")
 
-        self._executive_prepare_superposition(actual_classical_input_str)
-
-        # Logic related to goal state might influence op_gen by setting preferred_state,
-        # which happens in _executive_generate_computation_sequence now, using WM context.
+        self._executive_prepare_superposition(actual_computational_str)
         
+        # NOTE: Many internal methods will now use `self.current_conceptual_state`
+        # for context instead of `self.collapsed_computational_state_str`
         executed_sequence, chosen_op_strategy, op_gen_log_details = \
             self._executive_generate_computation_sequence(ops_provided_externally=computation_sequence_ops)
 
@@ -2615,59 +2744,56 @@ class SimplifiedOrchOREmulator:
         entropy_at_collapse = self._calculate_superposition_entropy()
         num_superposition_terms = len([a for a in self.logical_superposition.values() if abs(a) > 1e-9])
 
-        collapsed_outcome_str = self._executive_trigger_objective_reduction()
+        collapsed_comp_str = self._executive_trigger_objective_reduction()
+        # Look up the conceptual handle from the computational basis string
+        collapsed_concept_handle = self.universe['comp_basis_to_state'].get(collapsed_comp_str, self.universe['start_state'])
+        self.current_conceptual_state = collapsed_concept_handle
         orp_at_collapse = self.current_orp_before_reset
 
         # ADV_REASONING_FEATURE_1: Update active concepts based on the collapsed state.
-        self._executive_update_active_concepts(collapsed_outcome_str)
+        self._executive_update_active_concepts(collapsed_concept_handle)
 
-        if self.verbose >= 1: print(f"  ExecutiveLayer OR: Collapsed to |{collapsed_outcome_str}> (ORP experienced: {orp_at_collapse:.3f}, Early OR: {or_triggered_early}, Entropy: {entropy_at_collapse:.2f})")
-
-        raw_valence_of_collapse = self.outcome_valence_map.get(collapsed_outcome_str, -0.15)
+        if self.verbose >= 1: print(f"  ExecutiveLayer OR: Collapsed to {collapsed_concept_handle} (basis |{collapsed_comp_str}>) (ORP experienced: {orp_at_collapse:.3f}, Early OR: {or_triggered_early}, Entropy: {entropy_at_collapse:.2f})")
+        
+        raw_valence_of_collapse = self.universe['valence_map'].get(collapsed_concept_handle, -0.15)
         self._executive_handle_collapse_interrupts(orp_at_collapse, executed_sequence, raw_valence_of_collapse)
 
-        # Goal progress and WM context management for the current step happens within _executive_evaluate_outcome_and_update_mood
-        # specifically when it calls _executive_update_goal_progress
         executive_eval_results = self._executive_evaluate_outcome_and_update_mood(
-            collapsed_outcome_str, orp_at_collapse, entropy_at_collapse, len(executed_sequence or [])
+            collapsed_concept_handle, orp_at_collapse, entropy_at_collapse, len(executed_sequence or [])
         )
         if self.verbose >= 1: print(f"  ExecutiveLayer Eval: Val(raw/mod): {self.last_cycle_valence_raw:.2f}/{self.last_cycle_valence_mod:.2f}. Mood: {self.internal_state_parameters['mood']:.2f}, Frust: {self.internal_state_parameters['frustration']:.2f}")
         if self.verbose >=3 and executive_eval_results.get('thoughts_log'):
             for line_idx,line in enumerate(executive_eval_results['thoughts_log']): print(f"    AccEvalLog[{line_idx}]: {line}")
 
         if self.last_cycle_valence_mod > 0.65 and self.shared_attention_foci is not None:
-            self.shared_attention_foci.append({'state': collapsed_outcome_str, 'op_seq': executed_sequence,
+            self.shared_attention_foci.append({'state': collapsed_concept_handle, 'op_seq': executed_sequence,
                                                'valence': self.last_cycle_valence_mod, 'agent_id': self.agent_id,
                                                'cycle': self.current_cycle_num})
-            self._log_lot_event("coagent.attention_share", {"state":collapsed_outcome_str, "valence":self.last_cycle_valence_mod, "ops_count": len(executed_sequence or [])})
+            self._log_lot_event("coagent.attention_share", {"state":str(collapsed_concept_handle), "valence":self.last_cycle_valence_mod, "ops_count": len(executed_sequence or [])})
 
         consolidation_bonus = self.smn_internal_flags.pop('ltm_consolidation_bonus_factor', 1.0)
         
-        # Determine context for LTM update:
-        # initial_state_when_sequence_started should ideally be the state *before* executed_sequence was applied.
-        # This is self.collapsed_logical_state_str *from the previous cycle*, or `actual_classical_input_str` if it's the first real operation.
-        # For simplicity, if history exists, use prev cycle's collapsed state. Otherwise, use current actual input.
-        state_context_for_ltm = actual_classical_input_str # Default if no history
-        if self.cycle_history and len(self.cycle_history) > 0: # Check if cycle_history itself is not empty
+        # LTM Context is now based on conceptual StateHandles
+        state_context_for_ltm = actual_conceptual_state # Default if no history
+        if self.cycle_history and len(self.cycle_history) > 0:
             last_hist_entry = self.cycle_history[-1]
-            if last_hist_entry and 'collapsed_to' in last_hist_entry: # Check if the entry is valid
-                 state_context_for_ltm = last_hist_entry['collapsed_to']
-            elif 'actual_input_state_used' in last_hist_entry: # Fallback to input used in that history entry
-                 state_context_for_ltm = last_hist_entry['actual_input_state_used']
-
-# =================== AFTER ===================
+            if last_hist_entry and 'collapsed_to_handle' in last_hist_entry:
+                 state_context_for_ltm = last_hist_entry['collapsed_to_handle']
+            elif 'actual_input_state_handle' in last_hist_entry:
+                 state_context_for_ltm = last_hist_entry['actual_input_state_handle']
+        
         self._associative_layer_update_ltm(
             executed_sequence, self.last_cycle_valence_raw, orp_at_collapse, entropy_at_collapse,
-            collapsed_outcome_str, # Pass the final state for analogical context
+            collapsed_concept_handle,
             consolidation_factor=consolidation_bonus,
             initial_state_when_sequence_started=state_context_for_ltm,
-            input_context_when_sequence_started=actual_classical_input_str # The input that initiated this cycle's superposition
+            input_context_when_sequence_started=actual_conceptual_state
         )
         if self.verbose >=2 and consolidation_bonus > 1.0 : print(f"  AssociativeLayer LTM Update applied consolidation bonus: {consolidation_bonus:.1f}")
 
         self._meta_layer_update_cognitive_parameters(orp_at_collapse, len(executed_sequence or []), executive_eval_results, entropy_at_collapse)
-        self._meta_layer_adapt_preferred_state(collapsed_outcome_str, self.last_cycle_valence_mod) # May be influenced by WM context presence
-        if self.verbose >= 1: print(f"  MetaLayer State: Attn={self.internal_state_parameters['attention_level']:.2f},Cur={self.internal_state_parameters['curiosity']:.2f},PrefS=|{str(self.internal_state_parameters['preferred_logical_state'])}>,Load={self.internal_state_parameters['cognitive_load']:.2f}")
+        self._meta_layer_adapt_preferred_state(collapsed_concept_handle, self.last_cycle_valence_mod) # Use conceptual state
+        if self.verbose >= 1: print(f"  MetaLayer State: Attn={self.internal_state_parameters['attention_level']:.2f},Cur={self.internal_state_parameters['curiosity']:.2f},PrefS={str(self.internal_state_parameters['preferred_state_handle'])}>,Load={self.internal_state_parameters['cognitive_load']:.2f}")
 
 
         prev_mod_valence_for_smn = self.cycle_history[-1]['valence_mod_this_cycle'] if self.cycle_history else 0.0
@@ -2676,8 +2802,8 @@ class SimplifiedOrchOREmulator:
         self._firewall_detect_and_correct_anomalies() # Firewall might clear WM or alter goal status
 
         planning_log = []
-        self._executive_plan_next_target_input(collapsed_outcome_str, executive_eval_results, planning_log)
-        if self.verbose >= 1: print(f"  ExecutiveLayer PlanNext: Proposing |{self.next_target_input_state}> for next cycle.")
+        self._executive_plan_next_target_input(collapsed_concept_handle, executive_eval_results, planning_log)
+        if self.verbose >= 1: print(f"  ExecutiveLayer PlanNext: Proposing {self.next_target_input_state_handle} for next cycle.")
         if self.verbose >=3 :
             for line_idx, line in enumerate(planning_log): print(f"    PlanNextLog[{line_idx}]: {line}")
 
@@ -2696,15 +2822,16 @@ class SimplifiedOrchOREmulator:
 
         current_cycle_data = {
             "cycle_num":self.current_cycle_num, "agent_id": self.agent_id,
-            "intended_input_state":intended_classical_input_str, "actual_input_state_used":actual_classical_input_str,
+            "intended_input_state_handle":intended_conceptual_input, "actual_input_state_handle":actual_conceptual_state,
             "ops_executed":executed_sequence, "op_strategy":chosen_op_strategy, "num_ops_executed":len(executed_sequence or []),
-            "collapsed_to":collapsed_outcome_str, "orp_at_collapse":orp_at_collapse, "or_triggered_early": or_triggered_early,
+            "collapsed_to_comp":collapsed_comp_str, "collapsed_to_handle":collapsed_concept_handle,
+            "orp_at_collapse":orp_at_collapse, "or_triggered_early": or_triggered_early,
             "num_terms_before_collapse":num_superposition_terms, "entropy_at_collapse":entropy_at_collapse,
             "valence_raw_this_cycle":self.last_cycle_valence_raw, "valence_mod_this_cycle":self.last_cycle_valence_mod,
             "mood_after_cycle":self.internal_state_parameters['mood'], "attention_after_cycle":self.internal_state_parameters['attention_level'],
             "cog_load_after_cycle":self.internal_state_parameters['cognitive_load'], "frustration_after_cycle":self.internal_state_parameters['frustration'],
             "curiosity_after_cycle":self.internal_state_parameters['curiosity'], "goal_bias_after_cycle":self.internal_state_parameters['goal_seeking_bias'],
-            "preferred_state_after_cycle":str(self.internal_state_parameters['preferred_logical_state']),
+            "preferred_state_after_cycle":str(self.internal_state_parameters.get('preferred_state_handle')),
             "E_OR_thresh_this_cycle":self.E_OR_THRESHOLD, "orp_decay_this_cycle":self.orp_decay_rate,
             "exploration_mode_countdown_after_cycle": self.internal_state_parameters['exploration_mode_countdown'],
             "smn_flags_in_cycle": copy.deepcopy(self.smn_internal_flags),
@@ -2716,10 +2843,10 @@ class SimplifiedOrchOREmulator:
         self.cycle_history.append(current_cycle_data)
 
         cycle_duration = time.time() - start_time
-        self._log_lot_event("cycle_end", {"duration_ms": cycle_duration * 1000, "next_planned_input_str": self.next_target_input_state, "final_mood": self.internal_state_parameters['mood']})
-        if self.verbose >= 1: print(f"[{self.agent_id}] ===== Cycle {self.current_cycle_num} End (Dur: {cycle_duration:.3f}s, Next: |{self.next_target_input_state}>) Mood:{self.internal_state_parameters['mood']:.2f} =====")
+        self._log_lot_event("cycle_end", {"duration_ms": cycle_duration * 1000, "next_planned_input_handle": str(self.next_target_input_state_handle), "final_mood": self.internal_state_parameters['mood']})
+        if self.verbose >= 1: print(f"[{self.agent_id}] ===== Cycle {self.current_cycle_num} End (Dur: {cycle_duration:.3f}s, Next: {self.next_target_input_state_handle}) Mood:{self.internal_state_parameters['mood']:.2f} =====")
 
-        return self.next_target_input_state
+        return self.next_target_input_state_handle
 
     # --- Helper & Utility ---
     def logical_superposition_str(self):
@@ -2777,7 +2904,7 @@ class SimplifiedOrchOREmulator:
                     "goal_name": self.current_goal_state_obj.current_goal, 
                     "goal_step_name": step_name, 
                     "step_index": 0,
-                    "collapsed_state_at_eval_time": self.collapsed_logical_state_str, # State at the time of setting this initial context
+                    "collapsed_state_at_eval_time": self.collapsed_computational_state_str, # State at the time of setting this initial context
                     "cycle_num_pushed_for_eval": self.current_cycle_num # Pushed when goal is set / step 0 becomes active
                 }
                 item_to_push = WorkingMemoryItem(type="goal_step_context", data=wm_item_data, 
@@ -2862,7 +2989,7 @@ class SimplifiedOrchOREmulator:
             "agent_id": self.agent_id, "current_cycle_num": self.current_cycle_num,
             "mood": self.internal_state_parameters['mood'], "attention": self.internal_state_parameters['attention_level'],
             "frustration": self.internal_state_parameters['frustration'], "curiosity": self.internal_state_parameters['curiosity'],
-            "collapsed_state": self.collapsed_logical_state_str, "preferred_state": self.internal_state_parameters['preferred_logical_state'],
+            "collapsed_state": self.collapsed_computational_state_str, "preferred_state": self.internal_state_parameters['preferred_logical_state'],
             "E_OR_THRESHOLD": self.E_OR_THRESHOLD,
             "active_goal_name": self.current_goal_state_obj.current_goal if self.current_goal_state_obj else None,
             "active_goal_progress": self.current_goal_state_obj.progress if self.current_goal_state_obj else None,
@@ -2873,13 +3000,21 @@ class SimplifiedOrchOREmulator:
 
     def run_chained_cognitive_cycles(self, initial_input_str, num_cycles, computation_sequence_ops_template=None):
         if self.verbose >= 0: print(f"\n\n[{self.agent_id}] %%%%% STARTING CHAINED CYCLES (Num: {num_cycles}, Init Input: |{initial_input_str}>) %%%%%")
-        self.next_target_input_state = initial_input_str
+
+        try:
+            # Initialize the handle for the first run from the input string
+            self.next_target_input_state_handle = self.universe['comp_basis_to_state'][initial_input_str]
+        except KeyError:
+            if self.verbose >= 1: print(f"Warning: Initial input string '{initial_input_str}' not a valid state basis. Defaulting to start_state handle.")
+            self.next_target_input_state_handle = self.universe['start_state']
+
 
         for i in range(num_cycles):
-            current_input_str_for_cycle = self.next_target_input_state
+            # The handle to use for the current cycle is the one set by the previous cycle, or the initial one.
+            current_input_handle_for_cycle = self.next_target_input_state_handle
 
             if self.verbose >= 1:
-                pref_str = f"|{self.internal_state_parameters['preferred_logical_state']}>" if self.internal_state_parameters['preferred_logical_state'] else "None"
+                pref_str = f"{self.internal_state_parameters['preferred_state_handle']}" if self.internal_state_parameters['preferred_state_handle'] else "None"
                 goal_summary = "No Goal"
                 if self.current_goal_state_obj:
                     step_name = "N/A"
@@ -2888,7 +3023,7 @@ class SimplifiedOrchOREmulator:
                     goal_summary = f"Goal: '{self.current_goal_state_obj.current_goal}' Step: '{step_name}' ({self.current_goal_state_obj.status})"
                 wm_depth_info = f"WMd:{len(self.working_memory)}"
 
-                print(f"\n>>>> Chained Cycle {i+1}/{num_cycles} for {self.agent_id} <<<< Input: |{current_input_str_for_cycle}>; Mood:{self.internal_state_parameters['mood']:.2f}; Pref:{pref_str}; {goal_summary}; {wm_depth_info}")
+                print(f"\n>>>> Chained Cycle {i+1}/{num_cycles} for {self.agent_id} <<<< Input: {current_input_handle_for_cycle}; Mood:{self.internal_state_parameters['mood']:.2f}; Pref:{pref_str}; {goal_summary}; {wm_depth_info}")
 
             current_comp_ops = None
             if isinstance(computation_sequence_ops_template, list) and computation_sequence_ops_template:
@@ -2897,7 +3032,7 @@ class SimplifiedOrchOREmulator:
                  current_comp_ops = computation_sequence_ops_template(self, i)
 
             try:
-                self.run_full_cognitive_cycle(current_input_str_for_cycle, current_comp_ops)
+                self.run_full_cognitive_cycle(current_input_handle_for_cycle, current_comp_ops)
 
             except Exception as e:
                 critical_error_msg = f"CRITICAL EXCEPTION in cycle {self.current_cycle_num} (idx {i+1}) for agent {self.agent_id}: {type(e).__name__} - {e}.AGENT STOPPING."
@@ -2977,14 +3112,23 @@ class CoAgentManager:
             agent_threads = [] # For future threading if needed, now sequential
 
             for agent_idx, agent in enumerate(self.agents):
-                current_agent_input = agent.next_target_input_state
+                # Use the handle for the cycle. The manager passes strings, the agent works with handles.
+                current_agent_input_handle = agent.next_target_input_state_handle
                 if initial_input_per_agent_list and self.system_cycle_num == 1 and agent_idx < len(initial_input_per_agent_list):
-                    current_agent_input = initial_input_per_agent_list[agent_idx]
-                    agent.next_target_input_state = current_agent_input
+                    initial_input_str = initial_input_per_agent_list[agent_idx]
+                    try:
+                        current_agent_input_handle = agent.universe['comp_basis_to_state'][initial_input_str]
+                    except KeyError:
+                        print(f"Warning: CoAgentManager initial input '{initial_input_str}' for {agent.agent_id} not found, using agent default.")
+                        current_agent_input_handle = agent.next_target_input_state_handle
+                    agent.next_target_input_state_handle = current_agent_input_handle
 
-                if self.verbose >=1: print(f"  Running {agent.agent_id} (Cycle {agent.current_cycle_num + 1}) with intended input |{current_agent_input}>")
+                if self.verbose >=1: print(f"  Running {agent.agent_id} (Cycle {agent.current_cycle_num + 1}) with intended input {current_agent_input_handle}")
                 try:
-                    agent.run_full_cognitive_cycle(current_agent_input)
+                    # Pass the HANDLE to the cycle function now
+                    agent.run_full_cognitive_cycle(current_agent_input_handle)
+
+
                     if agent.cycle_history:
                         self.agent_performance_history[agent.agent_id].append(agent.cycle_history[-1]['valence_mod_this_cycle'])
                 except Exception as e:
@@ -3424,7 +3568,10 @@ if __name__ == '__main__':
         for key, info in emulator_demo1.smn_controlled_params_definitions.items()
     }
     print(f"{emulator_demo1.agent_id} starting with initial SMN values: {initial_smn_vals_d1}. SMN Graph enabled. Running 18 cycles.")
-    emulator_demo1.outcome_valence_map = {"00": -0.6, "01": 0.75, "10": -0.3, "11": 0.4}
+    emulator_demo1.universe['valence_map'] = {
+        StateHandle('00'): -0.6, StateHandle('01'): 0.75,
+        StateHandle('10'): -0.3, StateHandle('11'): 0.4
+    }
     emulator_demo1.run_chained_cognitive_cycles("00", 18) 
 
     print(f"\n{emulator_demo1.agent_id} Final SMN-controlled parameter values:")
@@ -3492,9 +3639,9 @@ if __name__ == '__main__':
 
     ### FIX 1.3 Part 2: Add an explicit op_hint to the goal to ensure the agent has a clear action to take, preventing passivity.
     goal_steps_demo2 = [
-        {"name": "Survive Initial Punishment", "target_state": "11", "next_ops_hint": [('H',0), ('H',1)], "requires_explicit_wm_context_push": True, "max_cycles_on_step": 7},
-        {"name": "Explore a bit", "target_state": "01", "requires_explicit_wm_context_push": False, "max_cycles_on_step": 7}
-    ]
+    {"name": "Survive Initial Punishment", "target_state": StateHandle("11"), "next_ops_hint": [('H',0), ('H',1)], "requires_explicit_wm_context_push": True, "max_cycles_on_step": 7},
+    {"name": "Explore a bit", "target_state": StateHandle("01"), "requires_explicit_wm_context_push": False, "max_cycles_on_step": 7}
+]
     task_goal_demo2 = GoalState(current_goal="Demo2 Survival and Exploration", steps=goal_steps_demo2)
     emulator_demo2.set_goal_state(task_goal_demo2)
 
@@ -3572,15 +3719,15 @@ if __name__ == '__main__':
 
 
     goal_steps_demo3 = [
-        {"name": "Reach state 01", "target_state": "01", "requires_explicit_wm_context_push": True, "next_ops_hint": [('X',0),('H',1)], "max_cycles_on_step": 4},
-        {"name": "From 01, reach state 10", 
-         "target_state": "10", 
-         "completion_criteria": demo3_step2_callable_criterion, # Uses target_state AND WM check
-         "next_input_for_world":"01", "requires_explicit_wm_context_push": True, 
-         # MODIFIED for Demo 3, Fix 2: Extend Step Timeout
-         "max_cycles_on_step": 8},
-        {"name": "From 10, reach state 11 (final)", "target_state": "11", "next_input_for_world":"10", "requires_explicit_wm_context_push": True, "max_cycles_on_step": 4}
-    ]
+    {"name": "Reach state 01", "target_state": StateHandle("01"), "requires_explicit_wm_context_push": True, "next_ops_hint": [('X',0),('H',1)], "max_cycles_on_step": 4},
+    {"name": "From 01, reach state 10", 
+     "target_state": StateHandle("10"), 
+     "completion_criteria": demo3_step2_callable_criterion, # Uses target_state AND WM check
+     "next_input_for_world": StateHandle("01"), "requires_explicit_wm_context_push": True, 
+     # MODIFIED for Demo 3, Fix 2: Extend Step Timeout
+     "max_cycles_on_step": 8},
+    {"name": "From 10, reach state 11 (final)", "target_state": StateHandle("11"), "next_input_for_world": StateHandle("10"), "requires_explicit_wm_context_push": True, "max_cycles_on_step": 4}
+]
     task_goal_demo3 = GoalState(current_goal="WM-Enhanced Multi-step Task", steps=goal_steps_demo3, error_tolerance=0.1)
     emulator_demo3.set_goal_state(task_goal_demo3)
 
@@ -3622,9 +3769,9 @@ if __name__ == '__main__':
         'working_memory_max_depth': 10 
     }
     coagent_variations_demo4 = [
-        {'config_overrides': {('internal_state_parameters', 'curiosity'): 0.85, ('E_OR_THRESHOLD',): 0.6, ('outcome_valence_map',): {"00":0.1,"01":0.9,"10":-0.3,"11":0.3}}},
-        {'config_overrides': {('internal_state_parameters', 'goal_seeking_bias'): 0.75, ('orp_decay_rate',): 0.008, ('outcome_valence_map',): {"00":-0.2,"01":0.7,"10":-0.7,"11":0.5}}},
-        {'config_overrides': {('internal_state_parameters', 'strategy_weights', 'memory'): 0.7, ('E_OR_THRESHOLD',): 1.3, ('outcome_valence_map',): {"00":0.0,"01":0.3,"10":-0.9,"11":0.8}}},
+        {'config_overrides': {('internal_state_parameters', 'curiosity'): 0.85, ('E_OR_THRESHOLD',): 0.6, ('universe', 'valence_map'): {StateHandle('00'):0.1, StateHandle('01'):0.9, StateHandle('10'):-0.3, StateHandle('11'):0.3}}},
+        {'config_overrides': {('internal_state_parameters', 'goal_seeking_bias'): 0.75, ('orp_decay_rate',): 0.008, ('universe', 'valence_map'): {StateHandle('00'):-0.2, StateHandle('01'):0.7, StateHandle('10'):-0.7, StateHandle('11'):0.5}}},
+        {'config_overrides': {('internal_state_parameters', 'strategy_weights', 'memory'): 0.7, ('E_OR_THRESHOLD',): 1.3, ('universe', 'valence_map'): {StateHandle('00'):0.0, StateHandle('01'):0.3, StateHandle('10'):-0.9, StateHandle('11'):0.8}}},
     ]
     manager_demo4 = CoAgentManager(num_agents=3,
                              base_emulator_config_template=coagent_base_conf_demo4,
@@ -3658,8 +3805,8 @@ if __name__ == '__main__':
     }
 
     trainer_goal_template_dict_d5 = {"current_goal": "Trainer Task: Reach 01",
-                                 "steps": [{"name": "Achieve state 01", "target_state": "01", "requires_explicit_wm_context_push":True}], 
-                                 "error_tolerance": 0.05}
+                             "steps": [{"name": "Achieve state 01", "target_state": StateHandle("01"), "requires_explicit_wm_context_push":True}], 
+                             "error_tolerance": 0.05}
 
     agent_trainer_d5 = CognitiveAgentTrainer(
         trainable_params_config=DEFAULT_TRAINABLE_PARAMS_CONFIG,
