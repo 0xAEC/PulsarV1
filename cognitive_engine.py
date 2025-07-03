@@ -2656,11 +2656,13 @@ class SimplifiedOrchOREmulator:
 # CoAgentManager (Feature 5: Parallel Cognitive Threads)
 # ---------------------------------------------------------------------------
 class CoAgentManager:
-    def __init__(self, num_agents, base_emulator_config_template, agent_config_variations_list=None, verbose=0):
+    def __init__(self, num_agents, base_emulator_config_template, agent_config_variations_list=None, trainable_params_config=None, verbose=0):
         self.num_agents = num_agents
         self.base_config = base_emulator_config_template
         self.agent_variations = agent_config_variations_list if agent_config_variations_list else []
         self.verbose = verbose
+        # ADDED LINE: Store the config on the instance. Use the imported default if none is provided.
+        self.trainable_params_config = copy.deepcopy(trainable_params_config) if trainable_params_config is not None else copy.deepcopy(DEFAULT_TRAINABLE_PARAMS_CONFIG)
 
         self.shared_long_term_memory = {}
         self.shared_attention_foci = collections.deque(maxlen=50 * max(1, num_agents // 2))
@@ -2808,11 +2810,11 @@ class CoAgentManager:
                 if self.verbose >= 1: print(f"    {learner_agent.agent_id} (perf {learner_data['perf']:.2f}) learning from {teacher_agent.agent_id} (perf {teacher_data['perf']:.2f})")
 
                 # Align trainable parameters (original logic)
-                params_to_align = list(DEFAULT_TRAINABLE_PARAMS_CONFIG.keys()) 
+                params_to_align = list(self.trainable_params_config.keys()) # <-- CORRECTED
                 alignment_factor = random.uniform(0.1, 0.25)
                 teacher_params_for_reference = {}
                 for param_name_for_teacher in params_to_align:
-                    config_teacher = DEFAULT_TRAINABLE_PARAMS_CONFIG[param_name_for_teacher]
+                    config_teacher = self.trainable_params_config[param_name_for_teacher] # <-- CORRECTED
                     dict_attr_teacher = config_teacher['target_dict_attr']
                     key_teacher = config_teacher['target_key']
                     subkey_teacher = config_teacher.get('target_subkey')
@@ -2833,7 +2835,7 @@ class CoAgentManager:
                 
                 learner_current_params_for_update = {}
                 for param_name, teacher_val in teacher_params_for_reference.items():
-                    config = DEFAULT_TRAINABLE_PARAMS_CONFIG[param_name]
+                    config = self.trainable_params_config[param_name] # <-- CORRECTED
                     dict_attr = config['target_dict_attr']
                     key = config['target_key']
                     subkey = config.get('target_subkey')
@@ -2861,8 +2863,6 @@ class CoAgentManager:
                     learner_agent._log_lot_event("coagent.learn_from_peer.params", {"teacher_id": teacher_agent.agent_id, "learner_perf":learner_data['perf'], "teacher_perf":teacher_data['perf'], "num_params_aligned": len(learner_current_params_for_update)})
                 
                 # MODIFIED for Demo 4, Fix 2: Align Agent02’s Preferred State (applied to current underperforming learner_agent if consensus_pref_state exists)
-                # This applies specifically if this learner is agent02, or more generally to underperformers.
-                # Assuming fix meant for "agent02" is prototypical of an underperformer to align.
                 if consensus_pref_state_from_top_agents and learner_agent.internal_state_parameters['preferred_logical_state'] != consensus_pref_state_from_top_agents:
                     old_pref_state_learner = learner_agent.internal_state_parameters['preferred_logical_state']
                     learner_agent.internal_state_parameters['preferred_logical_state'] = consensus_pref_state_from_top_agents
@@ -3073,4 +3073,3 @@ class CognitiveAgentTrainer:
             for i in range(0, len(param_details_list), num_columns):
                 row_items = [item.ljust(col_width) for item in param_details_list[i:i+num_columns]]
                 print(f"  {prefix}  {''.join(row_items)}")
-
