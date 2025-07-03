@@ -291,9 +291,9 @@ class SimplifiedOrchOREmulator:
 
         # For "push", indicate if an item was discarded from the bottom
         if op_type == "push" and 'item_discarded_on_push' in log_data and log_data['item_discarded_on_push']:
-            self._log_lot_event("workingmemory.full_discard", {'reason': f'implicit_discard_for_push_of_{item.type if item else "item"}'})
+            self._log_lot_event("workingmemory", "full_discard", {'reason': f'implicit_discard_for_push_of_{item.type if item else "item"}'})
         
-        self._log_lot_event(f"workingmemory.{op_type}", log_data)
+        self._log_lot_event("workingmemory", op_type, log_data)
 
 
     # --- Core Orch OR Mechanics (centralized, used primarily by Executive Layer) ---
@@ -308,7 +308,7 @@ class SimplifiedOrchOREmulator:
             if self.verbose >= 1: print(f"Warning: Op '{op_char_upper}' not in operation_costs. Using default cost {op_cost_val}.")
         new_orp += op_cost_val
 
-        self._log_lot_event("op_execution.attempt", {"op":op_char, "arg":logical_arg, "cost":op_cost_val, "cur_orp":current_orp})
+        self._log_lot_event("op_execution", "attempt", {"op":op_char, "arg":logical_arg, "cost":op_cost_val, "cur_orp":current_orp})
 
         error_occurred = False
         for basis_state_str, amp in current_superposition.items():
@@ -361,7 +361,7 @@ class SimplifiedOrchOREmulator:
 
             if error_occurred:
                  new_orp += self.operation_costs.get('ERROR_PENALTY',0.05)*0.2
-                 self._log_lot_event("op_execution.logic_error", {"op":op_char, "arg":logical_arg, "state":basis_state_str})
+                 self._log_lot_event("op_execution", "logic_error", {"op":op_char, "arg":logical_arg, "state":basis_state_str})
                  error_occurred = False
 
         final_superposition = {"00": 0j, "01": 0j, "10": 0j, "11": 0j}
@@ -372,7 +372,7 @@ class SimplifiedOrchOREmulator:
                 final_superposition[state_key] = amp_val / norm
         else:
             if self.verbose >=1: print(f"[{self.agent_id}] CRITICAL Warning: Superposition norm zero after op '{op_char_upper}'. Resetting to |00>.")
-            self._log_lot_event("op_execution.error", {"op":op_char, "error":"norm_zero_critical_reset_00"})
+            self._log_lot_event("op_execution", "error", {"op":op_char, "error":"norm_zero_critical_reset_00"})
             final_superposition["00"] = 1.0 + 0j
             new_orp += 0.2
         return dict(final_superposition), new_orp
@@ -390,12 +390,12 @@ class SimplifiedOrchOREmulator:
 
     def _executive_prepare_superposition(self, classical_input_str="00"):
         if self.verbose >= 2: print(f"  EXECUTIVE.Super_Prep: Target initial state |{classical_input_str}>")
-        self._log_lot_event("executive.super_prep", {"target_state": classical_input_str})
+        self._log_lot_event("executive", "super_prep", {"target_state": classical_input_str})
 
         self.logical_superposition = {"00": 0j, "01": 0j, "10": 0j, "11": 0j}
         if not (len(classical_input_str) == 2 and all(c in '01' for c in classical_input_str)):
             if self.verbose >= 1: print(f"    ERROR: Invalid classical_input_str '{classical_input_str}'. Defaulting to '00'.")
-            self._log_lot_event("executive.super_prep.error", {"input": classical_input_str, "defaulted_to": "00"})
+            self._log_lot_event("executive", "super_prep_error", {"input": classical_input_str, "defaulted_to": "00"})
             classical_input_str = "00"
         self.logical_superposition[classical_input_str] = 1.0 + 0j
         self.objective_reduction_potential = 0.0
