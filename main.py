@@ -254,8 +254,9 @@ if __name__ == '__main__':
         wm = context_dict['working_memory']
         if not wm.is_empty():
             top_item = wm.peek()
+            goal_name = context_dict['current_goal_obj'].current_goal
             if top_item.type == "goal_step_context" and \
-               top_item.data.get("goal_name") == context_dict['current_goal_obj'].current_goal and \
+               top_item.data.get("goal_name") == goal_name and \
                top_item.data.get("goal_step_name") == step_name_for_this_step and \
                top_item.data.get("step_index") == context_dict['current_goal_obj'].current_step_index:
                 wm_context_matches = True
@@ -340,7 +341,6 @@ if __name__ == '__main__':
     manager_demo4 = CoAgentManager(num_agents=3,
                              base_emulator_config_template=coagent_base_conf_demo4,
                              agent_config_variations_list=coagent_variations_demo4,
-                             # ADDED THIS LINE to pass the required config
                              trainable_params_config=DEFAULT_TRAINABLE_PARAMS_CONFIG,
                              verbose=MASTER_VERBOSE_LEVEL)
                              
@@ -426,5 +426,26 @@ if __name__ == '__main__':
     
     print(f"  Final Goal Status for {trained_emulator_d5.agent_id}: {trained_emulator_d5.current_goal_state_obj}")
 
+
+    # --- DEMO X: Interactive Psych-Probe ---
+    print("\n\n--- DEMO X: Interactive Psych-Probe ---")
+    probe_config = {
+        'verbose': 1,
+        'agent_id': "agent_probe_test",
+        **TWO_QUBIT_UNIVERSE_CONFIG,
+        'lot_config': {'enabled': True, 'log_level_details': { 'system':True, 'executive':True, 'meta':True, 'firewall':True, 'smn':True } },
+    }
+    probe_agent = SimplifiedOrchOREmulator(**probe_config)
+
+    # We will run 10 cycles, but set a breakpoint to trigger the probe after cycle 3
+    probe_agent.probe_at_cycle = 3
+
+    print(f"Running agent '{probe_agent.agent_id}' for 10 cycles with a probe set for cycle 3.")
+    print("After cycle 3, you will be dropped into an interactive shell.")
+    print("Type 'help' in the shell for a list of commands (e.g., 'summary', 'wm', 'ltm 5', 'get internal_state_parameters.mood').")
+
+    probe_agent.run_chained_cognitive_cycles(initial_input_str='00', num_cycles=10)
+
+    print(f"\n--- Probe Demo Concluded ---")
 
     print("\n\n--- ALL DEMOS COMPLETED ---")
