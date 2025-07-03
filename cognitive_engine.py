@@ -65,6 +65,7 @@ class SimplifiedOrchOREmulator:
         if universe is None:
             raise ValueError("A 'universe' configuration dictionary must be provided.")
         self.universe = universe
+        self.state_handle_by_id = {handle.id: handle for handle in self.universe['states']} 
         start_comp_basis = self.universe['state_to_comp_basis'][self.universe['start_state']]
         
         self.logical_superposition = {"00": 0j, "01": 0j, "10": 0j, "11": 0j}
