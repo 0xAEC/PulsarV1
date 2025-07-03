@@ -38,6 +38,8 @@ from configurations import (
 class SimplifiedOrchOREmulator:
 # --- START: COMPLETE AND CORRECTED __init__ METHOD ---
 
+# --- START: COMPLETE AND CORRECTED __init__ METHOD ---
+
     def __init__(self, agent_id="agent0", cycle_history_max_len=100,
                  universe: Dict = None,
                  initial_E_OR_THRESHOLD=1.0, initial_orp_decay_rate=0.01,
@@ -136,6 +138,17 @@ class SimplifiedOrchOREmulator:
             self._apply_config_overrides(config_overrides)
         if trainable_param_values:
             self.update_emulator_parameters(trainable_param_values)
+            
+        # === START OF CORRECTION ===
+        # Ensure that after all configs are loaded, the strategy_weights dictionary is complete.
+        # This prevents KeyErrors if a config variation overwrites it with a partial dict.
+        if 'strategy_weights' in self.internal_state_parameters:
+            for key, default_value in DEFAULT_INTERNAL_PARAMS['strategy_weights'].items():
+                if key not in self.internal_state_parameters['strategy_weights']:
+                    self.internal_state_parameters['strategy_weights'][key] = default_value
+        else:
+            self.internal_state_parameters['strategy_weights'] = copy.deepcopy(DEFAULT_INTERNAL_PARAMS['strategy_weights'])
+        # === END OF CORRECTION ===
 
         self.long_term_memory_capacity = 100
         self.successful_sequence_threshold_valence = 0.5 
@@ -153,7 +166,7 @@ class SimplifiedOrchOREmulator:
             if self.smn_config.get('enabled', False) and self.smn_config.get('enable_influence_matrix', False):
                  print(f"[{self.agent_id}] SMN Influence Matrix: Active ({len(self.smn_param_indices)} params, matrix_shape {self.smn_influence_matrix.shape})")
 
-# --- END: COMPLETE AND CORRECTED __init__ METHOD ---
+
     
     # ...[The ENTIRE rest of the SimplifiedOrchOREmulator class from the monolith, unmodified]...
     # [This section is elided for brevity, but all methods from _apply_config_overrides to 
@@ -660,11 +673,10 @@ class SimplifiedOrchOREmulator:
                         min_prune_score = prune_score
                         key_to_prune = k
 
-            if key_to_prune:
-                if self.verbose >=3: print(f"    LTM_Update: LTM full. Pruning {key_to_prune} (prune_score {min_prune_score:.2f}).")
-                # Modified log event for Directive Gamma - Test 4
-                self._log_lot_event("LTM", "PRUNING", {"pruned_seq": str(key_to_prune), "prune_score": min_prune_score})
-                del self.long_term_memory[key_to_prune]
+                if key_to_prune:
+                    if self.verbose >=3: print(f"    LTM_Update: LTM full. Pruning {key_to_prune} (prune_score {min_prune_score:.2f}).")
+                    self._log_lot_event("associative", "ltm_update_prune", {"pruned_seq_str":str(key_to_prune), "prune_score":min_prune_score})
+                    del self.long_term_memory[key_to_prune]
                 elif self.verbose >=2: print("    LTM_Update: LTM full, but no suitable key to prune found.")
 
             if len(self.long_term_memory) < self.long_term_memory_capacity:
@@ -1029,6 +1041,12 @@ class SimplifiedOrchOREmulator:
         exec_thought_log.append(f"  Target ops: ~{num_ops_target} (base:{num_ops_target_base}, load_factor:{cognitive_load_factor:.2f}, attn:{effective_attention:.2f}). ORP start: {self.objective_reduction_potential:.3f}")
         
         current_strategy_weights = self.internal_state_parameters['strategy_weights'].copy()
+        
+        # --- START OF CORRECTION ---
+        # Ensure all strategy keys from the default config exist to prevent KeyErrors
+        for key in DEFAULT_INTERNAL_PARAMS['strategy_weights']: 
+            if key not in current_strategy_weights: current_strategy_weights[key] = 0.001 
+        # --- END OF CORRECTION ---
         
         active_goal_step_info = None
         active_goal_step_name = "None"
@@ -1953,7 +1971,8 @@ class SimplifiedOrchOREmulator:
 
             current_dict_or_obj = getattr(target_obj, path_tuple[0])
             for key_part_idx in range(1, len(path_tuple) - 1):
-                current_dict_or_obj = current_dict_or_obj[key_part_idx]
+                # Correctly use the path segment string, not the loop index
+                current_dict_or_obj = current_dict_or_obj[path_tuple[key_part_idx]]
             current_dict_or_obj[path_tuple[-1]] = value
             return True
         except (AttributeError, KeyError, IndexError, TypeError) as e:
@@ -2592,7 +2611,7 @@ class SimplifiedOrchOREmulator:
             "verbose": self.verbose, 
         }
 
-    def run_chained_cognitive_cycles(self, initial_input_str, num_cycles, computation_sequence_ops_template=None):
+    def run_chained_cognitive_cycles(self, initial_input_str, num_cycles, computation_sequence_ops_template=None, stop_condition=None):
         if self.verbose >= 0: print(f"\n\n[{self.agent_id}] %%%%% STARTING CHAINED CYCLES (Num: {num_cycles}, Init Input: |{initial_input_str}>) %%%%%")
 
         try:
@@ -2603,6 +2622,14 @@ class SimplifiedOrchOREmulator:
 
 
         for i in range(num_cycles):
+            # === START OF CORRECTION ===
+            # Check stop condition at the beginning of each cycle.
+            if stop_condition and stop_condition(self):
+                if self.verbose >= 1:
+                    print(f">>>> Chained Cycle {i+1}/{num_cycles} for {self.agent_id}: STOP CONDITION MET. Halting chain. <<<<")
+                break
+            # === END OF CORRECTION ===
+
             current_input_handle_for_cycle = self.next_target_input_state_handle
 
             if self.verbose >= 1:
@@ -2663,16 +2690,27 @@ class CoAgentManager:
     def _initialize_agents(self):
         for i in range(self.num_agents):
             agent_id = f"agent{i:02d}"
+            # Start with a deep copy of the base configuration template
             agent_kwargs = copy.deepcopy(self.base_config)
             agent_kwargs['agent_id'] = agent_id
-            
+
             if i < len(self.agent_variations):
-                agent_custom_settings = copy.deepcopy(self.agent_variations[i]) # Deep copy variation
+                agent_custom_settings = copy.deepcopy(self.agent_variations[i])
+
+                # Get the variation for internal_state_parameters_config, if it exists
+                variation_internal_params = agent_custom_settings.pop('internal_state_parameters_config', {})
                 
-                # Intelligent merging for nested dicts
+                # Ensure the base config has an internal_state_parameters_config key to merge into
+                if 'internal_state_parameters_config' not in agent_kwargs:
+                    agent_kwargs['internal_state_parameters_config'] = copy.deepcopy(DEFAULT_INTERNAL_PARAMS)
+                
+                # Merge the variation's internal params into the agent's config
+                agent_kwargs['internal_state_parameters_config'].update(variation_internal_params)
+
+                # Now update the rest of the agent_kwargs with the remaining variations
                 for key, value in agent_custom_settings.items():
-                    if key in agent_kwargs and isinstance(agent_kwargs[key], dict) and isinstance(value, dict):
-                        agent_kwargs[key] = {**agent_kwargs[key], **value}
+                    if key in agent_kwargs and isinstance(agent_kwargs.get(key), dict) and isinstance(value, dict):
+                        agent_kwargs[key].update(value)
                     else:
                         agent_kwargs[key] = value
 
