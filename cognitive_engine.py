@@ -1,11 +1,6 @@
 # cognitive_engine.py
 
-"""
-This file is the "brain." It contains the core agent class and its
-operational frameworks (Trainer, CoAgentManager). It contains no top-level 
-configuration dictionaries; it imports them from `configurations.py` and
-uses them as defaults.
-"""
+
 
 import numpy as np
 import copy
