@@ -660,10 +660,11 @@ class SimplifiedOrchOREmulator:
                         min_prune_score = prune_score
                         key_to_prune = k
 
-                if key_to_prune:
-                    if self.verbose >=3: print(f"    LTM_Update: LTM full. Pruning {key_to_prune} (prune_score {min_prune_score:.2f}).")
-                    self._log_lot_event("associative", "ltm_update_prune", {"pruned_seq_str":str(key_to_prune), "prune_score":min_prune_score})
-                    del self.long_term_memory[key_to_prune]
+            if key_to_prune:
+                if self.verbose >=3: print(f"    LTM_Update: LTM full. Pruning {key_to_prune} (prune_score {min_prune_score:.2f}).")
+                # Modified log event for Directive Gamma - Test 4
+                self._log_lot_event("LTM", "PRUNING", {"pruned_seq": str(key_to_prune), "prune_score": min_prune_score})
+                del self.long_term_memory[key_to_prune]
                 elif self.verbose >=2: print("    LTM_Update: LTM full, but no suitable key to prune found.")
 
             if len(self.long_term_memory) < self.long_term_memory_capacity:
