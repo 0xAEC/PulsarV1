@@ -16,7 +16,7 @@ import traceback
 import math 
 from typing import List, Dict, Any, Deque, Optional, Tuple, Callable
 
-from core_abstractions import StateHandle, WorkingMemoryItem, WorkingMemoryStack, GoalState
+from core_abstractions import StateHandle, WorkingMemoryItem, WorkingMemoryStack, GoalState, LogEntry
 from configurations import (
     DEFAULT_INTERNAL_PARAMS,
     DEFAULT_METACOGNITION_PARAMS,
