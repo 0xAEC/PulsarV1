@@ -238,46 +238,44 @@ class SimplifiedOrchOREmulator:
                 if not sw: self.internal_state_parameters['strategy_weights'] = {'curiosity': 1.0}
 
     # --- Feature 8: Internal Language Layer ---
-    def _log_lot_event(self, event_type: str, details: dict):
+    def _log_lot_event(self, event_source: str, event_type: str, details: dict):
+        # Configuration check remains similar
         if not self.lot_config_params.get('enabled', False): return
-
         log_details_config = self.lot_config_params.get('log_level_details', {})
         
-        event_type_parts = event_type.split('.')
-        event_category_for_ops_check = event_type_parts[0] + "_ops" # e.g. workingmemory.push -> workingmemory_ops
-        event_category_for_general_check = event_type_parts[0] # e.g. workingmemory.push -> workingmemory
-        event_category_for_wildcard_check = event_category_for_general_check + ".*" # e.g. workingmemory.*
+        # Check against lowercase keys from config
+        source_key_lower = event_source.lower()
+        full_key_lower = f"{source_key_lower}.{event_type.lower()}"
 
-        should_log_this_event = False
-        if log_details_config.get(event_category_for_ops_check, False): # Check "category_ops" toggle
-            should_log_this_event = True
-        elif log_details_config.get(event_type, False): # Check specific event toggle (e.g., "workingmemory.push_goal_context")
-            should_log_this_event = True
-        elif log_details_config.get(event_category_for_wildcard_check, False): # Check "category.*" toggle
-            should_log_this_event = True
-        elif log_details_config.get(event_category_for_general_check, False): # Check "category" toggle (e.g., "workingmemory")
-            should_log_this_event = True
+        # Split source key if it contains dots for checking, e.g., "executive.opgen"
+        source_main_category = source_key_lower.split('.')[0]
         
-        if not should_log_this_event:
-            return
-
-        param_strs = []
+        # New, simpler check logic based on the directive and old config files' structure
+        # Log if a specific key `source.type` exists and is true, or if the main category `source` exists and is true
+        if not (log_details_config.get(full_key_lower, False) or 
+                log_details_config.get(source_key_lower, False) or
+                log_details_config.get(source_main_category, False) or
+                log_details_config.get(source_main_category+"_ops", False) # Maintain compatibility with keys like `workingmemory_ops`
+               ):
+             return
+        
+        # Create and append the structured LogEntry object
+        # Sanitize details for logging to avoid excessive length
+        sanitized_details = {}
         for k, v in details.items():
-            if isinstance(v, float):
-                param_strs.append(f"{k}:{v:.3f}")
-            elif isinstance(v, (list, tuple)) and len(v) > 4:
-                 param_strs.append(f"{k}:[...{len(v)}items...]")
-            elif isinstance(v, dict) and len(v) > 2:
-                 param_strs.append(f"{k}:{{...{len(v)}keys...}}")
-            elif isinstance(v, np.ndarray):
-                 param_strs.append(f"{k}:ndarray_shape{v.shape}")
+            if isinstance(v, (np.ndarray, list, tuple, dict)) and len(v) > 5:
+                sanitized_details[k] = f"<{type(v).__name__} of len {len(v)}>"
+            elif isinstance(v, str) and len(v) > 70:
+                sanitized_details[k] = v[:67] + "..."
             else:
-                v_str = str(v)
-                if len(v_str) > 35 : v_str = v_str[:32] + "..."
-                param_strs.append(f"{k}:{v_str}")
+                sanitized_details[k] = v
 
-        tag_name = event_type.upper().replace(".", "_") 
-        self.current_cycle_lot_stream.append(f"#{tag_name}[{','.join(param_strs)}]")
+        log_entry = LogEntry(
+            event_source=event_source.upper(),
+            event_type=event_type.upper(),
+            details=sanitized_details
+        )
+        self.current_cycle_lot_stream.append(log_entry)
 
     # --- Working Memory Logging Helper (NEW) 
     def _log_wm_op(self, op_type: str, item: WorkingMemoryItem = None, details: dict = None):
