@@ -12,6 +12,34 @@ import collections
 import copy
 from typing import NamedTuple, List, Dict, Callable, Any
 
+from dataclasses import dataclass, field
+
+
+@dataclass
+class LogEntry:
+    """A structured entry for the agent's Language of Thought stream."""
+    timestamp: float = field(default_factory=time.time)
+    event_source: str = "SYSTEM"
+    event_type: str = "GENERIC"
+    details: Dict[str, Any] = field(default_factory=dict)
+    
+    def __str__(self):
+        # Format floats to be more readable
+        formatted_details = {}
+        for k, v in self.details.items():
+            if isinstance(v, float):
+                formatted_details[k] = f"{v:.3f}"
+            else:
+                formatted_details[k] = v
+
+        detail_str = ", ".join(f"{k}={v}" for k, v in formatted_details.items())
+        # Use strftime for consistent timestamp formatting and get milliseconds manually
+        time_obj = time.localtime(self.timestamp)
+        ms = f".{int((self.timestamp - int(self.timestamp)) * 1000):03d}"
+        time_str = time.strftime('%H:%M:%S', time_obj) + ms
+
+        return f"[{time_str}] [{self.event_source}:{self.event_type}] {detail_str}"
+
 # ---------------------------------------------------------------------------
 # State Abstraction Layer (The "Soul" That Can Inhabit Any "Body")
 # ---------------------------------------------------------------------------
