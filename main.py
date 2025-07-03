@@ -449,3 +449,201 @@ if __name__ == '__main__':
     print(f"\n--- Probe Demo Concluded ---")
 
     print("\n\n--- ALL DEMOS COMPLETED ---")
+
+    # -----------------------------------------------------------------------------------------------
+    # --- DIRECTIVE GAMMA: RUN COGNITIVE GYM STRESS TESTS
+    # -----------------------------------------------------------------------------------------------
+
+    def run_despair_test(master_verbose_level):
+        """
+        STRESS TEST 1: The Despair Scenario
+        Places the agent in a maximally hostile environment to test the firewall and adaptive desperation.
+        """
+        print("\n\n--- STRESS TEST 1: The Despair Scenario ---")
+        
+        # 1. Create a hostile universe
+        despair_universe_config = copy.deepcopy(TWO_QUBIT_UNIVERSE_CONFIG)
+        despair_universe_config['valence_map'] = {
+            STATE_00: -0.8, STATE_01: -0.6, STATE_10: -0.7, STATE_11: -0.9
+        }
+        despair_universe_config['name'] = "Despair Universe"
+
+        # 2. Configure a sensitive firewall and reactive SMN
+        despair_firewall_config = {
+            'enabled': True, 'check_interval': 3, 'low_valence_streak_needed': 2, 'cooldown_duration': 5
+        }
+        despair_smn_reactive_params = {
+             'smn_mutation_strength_grow': 1.05 # This param is in internal_state_parameters
+        }
+        despair_lot_config = {
+            'enabled':True,
+            'log_level_details': { 'firewall.intervention':True, 'smn.update.mutation_applied':True, 'cycle_start':True }
+        }
+
+        # 3. Assemble the agent's configuration
+        despair_agent_config = {
+            **despair_universe_config,
+            'agent_id': "agent_despair",
+            'verbose': master_verbose_level,
+            'cognitive_firewall_config': despair_firewall_config,
+            'internal_state_parameters_config': {**DEFAULT_INTERNAL_PARAMS, **despair_smn_reactive_params},
+            'lot_config': despair_lot_config,
+            'smn_general_config': {'enabled': True} # Must be enabled to grow mutation strength
+        }
+        
+        # 4. Instantiate and run the agent
+        agent_despair = SimplifiedOrchOREmulator(**despair_agent_config)
+        
+        print(f"Running '{agent_despair.agent_id}' in a punishing environment for 50 cycles.")
+        print("SUCCESS CRITERIA: Expecting Cognitive Firewall intervention, rising frustration/curiosity, and increasing SMN mutation strengths.")
+        agent_despair.run_chained_cognitive_cycles("00", 50)
+        
+        # 5. Report results
+        print(f"\n--- Despair Test Summary for {agent_despair.agent_id} ---")
+        agent_despair.print_internal_state_summary(indent="  ")
+
+    def run_euphoria_test(master_verbose_level):
+        """
+        STRESS TEST 2: The Euphoria Trap
+        Places the agent in a universally rewarding environment to test for cognitive complacency.
+        """
+        print("\n\n--- STRESS TEST 2: The Euphoria Trap ---")
+        
+        # 1. Create a universally rewarding universe
+        euphoria_universe_config = copy.deepcopy(TWO_QUBIT_UNIVERSE_CONFIG)
+        euphoria_universe_config['valence_map'] = {
+            STATE_00: 0.8, STATE_01: 0.95, STATE_10: 0.85, STATE_11: 1.0
+        }
+        euphoria_universe_config['name'] = "Euphoria Universe"
+        
+        # 2. Configure metacognition and logging
+        euphoria_metacognition_config = {
+            **DEFAULT_METACOGNITION_PARAMS,
+            'low_valence_threshold': -0.9, 
+            'high_valence_threshold': 0.7
+        }
+        euphoria_lot_config = {
+            'enabled':True,
+            'log_level_details': { 'metacognitive_review':True, 'meta.review_self_model_update': True, 'executive.opgen.strategy_selected':True }
+        }
+
+        # 3. Assemble agent configuration
+        euphoria_agent_config = {
+            **euphoria_universe_config,
+            'agent_id': "agent_euphoria",
+            'verbose': master_verbose_level,
+            'metacognition_config': euphoria_metacognition_config,
+            'lot_config': euphoria_lot_config,
+            'smn_general_config': {'enabled': False}
+        }
+
+        # 4. Instantiate and run
+        agent_euphoria = SimplifiedOrchOREmulator(**euphoria_agent_config)
+        print(f"Running '{agent_euphoria.agent_id}' in a euphoric environment for 50 cycles.")
+        print("SUCCESS CRITERIA: Expecting saturated mood, decayed curiosity, dominant memory strategy, and repetitive behavior.")
+        agent_euphoria.run_chained_cognitive_cycles("00", 50)
+        
+        # 5. Report results
+        print(f"\n--- Euphoria Test Summary for {agent_euphoria.agent_id} ---")
+        agent_euphoria.print_internal_state_summary(indent="  ")
+
+
+    def run_sisyphean_test(master_verbose_level):
+        """
+        STRESS TEST 3: The Sisyphean Task
+        Gives the agent a logically impossible goal to test graceful failure and frustration mechanics.
+        """
+        print("\n\n--- STRESS TEST 3: The Sisyphean Task ---")
+
+        # 1. Define the impossible goal
+        # From |01> (State_01), it's impossible to reach |10> (State_10) with problem-solving.
+        # It requires ops on both qubits. The agent will likely flail, trying single-qubit ops.
+        # The `max_cycles_on_step` will cause it to time out and fail.
+        impossible_goal_steps = [
+            {"name": "Step 1: Achieve state 01", "target_state": STATE_01, "max_cycles_on_step": 10},
+            {"name": "Step 2: (Impossible) Achieve state 10", "target_state": STATE_10, "max_cycles_on_step": 8, "next_input_for_world": STATE_01},
+        ]
+        sisyphus_goal = GoalState(current_goal="Push the Boulder", steps=impossible_goal_steps)
+        
+        # 2. Configure logging
+        sisyphus_lot_config = {
+            'enabled': True,
+            'log_level_details': {'goal_tracking':True, 'executive.opgen.strategy_selected':True, 'executive.goalprogress_goal_fail': True, 'executive.outcome_eval_valence': True}
+        }
+        
+        # 3. Assemble agent configuration
+        sisyphus_config = {
+            **TWO_QUBIT_UNIVERSE_CONFIG,
+            'agent_id': "agent_sisyphus",
+            'verbose': master_verbose_level,
+            'lot_config': sisyphus_lot_config
+        }
+        
+        # 4. Instantiate, set goal, and run
+        agent_sisyphus = SimplifiedOrchOREmulator(**sisyphus_config)
+        agent_sisyphus.set_goal_state(sisyphus_goal)
+        
+        print(f"Running '{agent_sisyphus.agent_id}' on an impossible task for 20 cycles.")
+        print("SUCCESS CRITERIA: Must complete Step 1, fail Step 2 via timeout, log 'step_no_progress', mark goal as 'failed', and show frustration spike.")
+        agent_sisyphus.run_chained_cognitive_cycles("00", 20)
+
+        # 5. Report results
+        print(f"\n--- Sisyphean Test Summary for {agent_sisyphus.agent_id} ---")
+        if agent_sisyphus.current_goal_state_obj:
+            print(f"  Final Goal Status: {agent_sisyphus.current_goal_state_obj}")
+            if agent_sisyphus.current_goal_state_obj.history:
+                print("  Recent Goal History:")
+                for entry in agent_sisyphus.current_goal_state_obj.history[-5:]:
+                    print(f"    - {entry}")
+        agent_sisyphus.print_internal_state_summary(indent="  ")
+
+
+    def run_amnesia_test(master_verbose_level):
+        """
+        STRESS TEST 4: The Amnesia Trial
+        Forces the agent to constantly prune its LTM to test the pruning logic's stability and correctness.
+        """
+        print("\n\n--- STRESS TEST 4: The Amnesia Trial ---")
+
+        # 1. Configure the agent with a tiny LTM
+        amnesia_config = {
+            **TWO_QUBIT_UNIVERSE_CONFIG,
+            'agent_id': "agent_amnesia",
+            'verbose': master_verbose_level,
+            'long_term_memory_capacity': 5, # Critical change for this test
+            'lot_config': {
+                'enabled': True,
+                'log_level_details': {
+                    'LTM.PRUNING': True, # Enable our new, specific log event
+                    'associative.ltm_update_new_entry': True, # To see memory filling up
+                    'cycle_start': True,
+                }
+            }
+        }
+        
+        # 2. Instantiate and run
+        agent_amnesia = SimplifiedOrchOREmulator(**amnesia_config)
+        print(f"Running '{agent_amnesia.agent_id}' with LTM capacity of {agent_amnesia.long_term_memory_capacity} for 100 cycles to force churn.")
+        print("SUCCESS CRITERIA: Agent runs without crashing, LTM::PRUNING events appear in the log, and pruned memories are low-utility/low-confidence.")
+        agent_amnesia.run_chained_cognitive_cycles("00", 100)
+
+        # 3. Report results
+        print(f"\n--- Amnesia Test Summary for {agent_amnesia.agent_id} ---")
+        print(f"  Final LTM size: {len(agent_amnesia.long_term_memory)} / {agent_amnesia.long_term_memory_capacity}")
+        if agent_amnesia.long_term_memory:
+            print("  Remaining LTM entries (sorted by utility):")
+            sorted_ltm = sorted(agent_amnesia.long_term_memory.items(), key=lambda item: item[1].get('utility', 0.0))
+            for i, (seq, data) in enumerate(sorted_ltm):
+                util = data.get('utility', 0)
+                conf = data.get('confidence', 0)
+                score = util - conf * 0.2
+                print(f"    [{i}] util:{util:.3f} conf:{conf:.3f} (prune_score:{score:.3f}) | seq: {seq}")
+        else:
+            print("  LTM is empty.")
+    
+    # Run the Stress Tests
+    print("\n\n" + "#"*15 + " DIRECTIVE GAMMA: COGNITIVE STRESS TESTS " + "#"*15)
+    run_despair_test(MASTER_VERBOSE_LEVEL)
+    run_euphoria_test(MASTER_VERBOSE_LEVEL)
+    run_sisyphean_test(MASTER_VERBOSE_LEVEL)
+    run_amnesia_test(MASTER_VERBOSE_LEVEL)
