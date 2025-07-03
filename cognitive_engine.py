@@ -17,7 +17,20 @@ import math
 from typing import List, Dict, Any, Deque, Optional, Tuple, Callable
 
 from core_abstractions import StateHandle, WorkingMemoryItem, WorkingMemoryStack, GoalState
-from configurations import * # Import all default config dicts for use as defaults
+from configurations import (
+    DEFAULT_INTERNAL_PARAMS,
+    DEFAULT_METACOGNITION_PARAMS,
+    DEFAULT_ORP_THRESHOLD_DYNAMICS,
+    DEFAULT_ORP_DECAY_DYNAMICS,
+    DEFAULT_TRAINABLE_PARAMS_CONFIG,
+    DEFAULT_TEMPORAL_GRID_PARAMS,
+    DEFAULT_SMN_CONFIG,
+    DEFAULT_SMN_CONTROLLED_PARAMS,
+    DEFAULT_INTERRUPT_HANDLER_CONFIG,
+    DEFAULT_COGNITIVE_FIREWALL_CONFIG,
+    DEFAULT_GOAL_STATE_PARAMS,
+    DEFAULT_LOT_CONFIG
+)
 
 # ---------------------------------------------------------------------------
 # Class Definition: SimplifiedOrchOREmulator
