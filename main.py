@@ -340,6 +340,8 @@ if __name__ == '__main__':
     manager_demo4 = CoAgentManager(num_agents=3,
                              base_emulator_config_template=coagent_base_conf_demo4,
                              agent_config_variations_list=coagent_variations_demo4,
+                             # ADDED THIS LINE to pass the required config
+                             trainable_params_config=DEFAULT_TRAINABLE_PARAMS_CONFIG,
                              verbose=MASTER_VERBOSE_LEVEL)
                              
     print(f"CoAgentManager demo with {manager_demo4.num_agents} agents. Running 15 system cycles. Expect inter-agent learning attempts.")
