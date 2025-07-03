@@ -11,8 +11,8 @@ import time
 import collections
 import copy
 from typing import NamedTuple, List, Dict, Callable, Any
-
 from dataclasses import dataclass, field
+import numpy as np # <-- Needed for sanitizing in LogEntry
 
 
 @dataclass
@@ -39,6 +39,7 @@ class LogEntry:
         time_str = time.strftime('%H:%M:%S', time_obj) + ms
 
         return f"[{time_str}] [{self.event_source}:{self.event_type}] {detail_str}"
+
 
 # ---------------------------------------------------------------------------
 # State Abstraction Layer (The "Soul" That Can Inhabit Any "Body")
