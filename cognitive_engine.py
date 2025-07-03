@@ -23,6 +23,8 @@ from configurations import * # Import all default config dicts for use as defaul
 # Class Definition: SimplifiedOrchOREmulator
 # ---------------------------------------------------------------------------
 class SimplifiedOrchOREmulator:
+# --- START: COMPLETE AND CORRECTED __init__ METHOD ---
+
     def __init__(self, agent_id="agent0", cycle_history_max_len=100,
                  universe: Dict = None,
                  initial_E_OR_THRESHOLD=1.0, initial_orp_decay_rate=0.01,
@@ -47,17 +49,15 @@ class SimplifiedOrchOREmulator:
         self.agent_id = agent_id
         self.verbose = verbose
         
-        # MANDATORY REFACTOR: Use imported configs as defaults for None-type keyword arguments
         if universe is None:
             raise ValueError("A 'universe' configuration dictionary must be provided.")
         self.universe = universe
         start_comp_basis = self.universe['state_to_comp_basis'][self.universe['start_state']]
         
-        # Core computational state remains in the string basis
         self.logical_superposition = {"00": 0j, "01": 0j, "10": 0j, "11": 0j}
         self.logical_superposition[start_comp_basis] = 1.0 + 0j
         self.collapsed_computational_state_str = start_comp_basis
-        self.current_conceptual_state = self.universe['start_state'] # State in agent's 'reality'
+        self.current_conceptual_state = self.universe['start_state']
 
         self.objective_reduction_potential = 0.0
         self.E_OR_THRESHOLD = initial_E_OR_THRESHOLD
@@ -68,19 +68,8 @@ class SimplifiedOrchOREmulator:
         self.last_cycle_valence_mod = 0.0
         self.current_orp_before_reset = 0.0
 
-        # MANDATORY REFACTOR: Apply the new configuration loading pattern.
+        # === START OF CORRECTED CONFIGURATION LOADING ===
         self.internal_state_parameters = copy.deepcopy(DEFAULT_INTERNAL_PARAMS) if internal_state_parameters_config is None else copy.deepcopy(internal_state_parameters_config)
-        
-        # Handle string-based preferred state from old configs for compatibility.
-        # This logic is based on the provided values, not the default, so it's placed after initialization.
-        if self.internal_state_parameters.get('preferred_logical_state'):
-             try:
-                 handle = self.universe['comp_basis_to_state'][self.internal_state_parameters['preferred_logical_state']]
-                 self.internal_state_parameters['preferred_state_handle'] = handle
-                 del self.internal_state_parameters['preferred_logical_state'] # Remove old key
-             except KeyError:
-                 if self.verbose >=1: print(f"Warning: Could not convert old 'preferred_logical_state' string to a StateHandle.")
-
         self.metacognition_params = copy.deepcopy(DEFAULT_METACOGNITION_PARAMS) if metacognition_config is None else copy.deepcopy(metacognition_config)
         self.orp_threshold_dynamics = copy.deepcopy(DEFAULT_ORP_THRESHOLD_DYNAMICS) if orp_threshold_dynamics_config is None else copy.deepcopy(orp_threshold_dynamics_config)
         self.orp_decay_dynamics = copy.deepcopy(DEFAULT_ORP_DECAY_DYNAMICS) if orp_decay_dynamics_config is None else copy.deepcopy(orp_decay_dynamics_config)
@@ -91,12 +80,19 @@ class SimplifiedOrchOREmulator:
         self.firewall_params = copy.deepcopy(DEFAULT_COGNITIVE_FIREWALL_CONFIG) if cognitive_firewall_config is None else copy.deepcopy(cognitive_firewall_config)
         self.goal_state_config_params = copy.deepcopy(DEFAULT_GOAL_STATE_PARAMS) if goal_state_params is None else copy.deepcopy(goal_state_params)
         self.lot_config_params = copy.deepcopy(DEFAULT_LOT_CONFIG) if lot_config is None else copy.deepcopy(lot_config)
+        # === END OF CORRECTED CONFIGURATION LOADING ===
+        
+        if self.internal_state_parameters.get('preferred_logical_state'):
+             try:
+                 handle = self.universe['comp_basis_to_state'][self.internal_state_parameters['preferred_logical_state']]
+                 self.internal_state_parameters['preferred_state_handle'] = handle
+                 del self.internal_state_parameters['preferred_logical_state']
+             except KeyError:
+                 if self.verbose >=1: print(f"Warning: Could not convert old 'preferred_logical_state' string to a StateHandle.")
 
-        # LTM/Attention can be shared or independent
         self.long_term_memory = shared_long_term_memory if shared_long_term_memory is not None else {}
         self.shared_attention_foci = shared_attention_foci if shared_attention_foci is not None else collections.deque(maxlen=20)
         
-        # Direct attributes, not from config files
         self.ltm_utility_weight_valence = 0.6
         self.ltm_utility_weight_efficiency = 0.4
         
@@ -113,12 +109,8 @@ class SimplifiedOrchOREmulator:
 
         self.firewall_cooldown_remaining = 0
         self.firewall_cycles_since_last_check = 0
-
         self.current_goal_state_obj = None
-
-        # ADV_REASONING_FEATURE_1: Initialize active concepts state
         self.active_concepts = set()
-
         self.working_memory = WorkingMemoryStack(max_depth=working_memory_max_depth)
         self.current_cycle_lot_stream = []
         
@@ -126,15 +118,12 @@ class SimplifiedOrchOREmulator:
         self.post_goal_valence_lock_value = 0.2
         self.post_goal_valence_lock_duration = 3
 
-
         if config_overrides:
             self._apply_config_overrides(config_overrides)
-
         if trainable_param_values:
             self.update_emulator_parameters(trainable_param_values)
 
         self.long_term_memory_capacity = 100
-        # This will be overridden by the config override in main, but has a default here.
         self.successful_sequence_threshold_valence = 0.5 
 
         self.cycle_history = collections.deque(maxlen=cycle_history_max_len)
@@ -149,6 +138,8 @@ class SimplifiedOrchOREmulator:
                 print(f"[{self.agent_id}] Temporal Feedback Grid: Active (maxlen={self.temporal_grid_params['max_len']}, window={self.temporal_grid_params['feedback_window']})")
             if self.smn_config.get('enabled', False) and self.smn_config.get('enable_influence_matrix', False):
                  print(f"[{self.agent_id}] SMN Influence Matrix: Active ({len(self.smn_param_indices)} params, matrix_shape {self.smn_influence_matrix.shape})")
+
+# --- END: COMPLETE AND CORRECTED __init__ METHOD ---
     
     # ...[The ENTIRE rest of the SimplifiedOrchOREmulator class from the monolith, unmodified]...
     # [This section is elided for brevity, but all methods from _apply_config_overrides to 
