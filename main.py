@@ -448,7 +448,6 @@ if __name__ == '__main__':
 
     print(f"\n--- Probe Demo Concluded ---")
 
-    print("\n\n--- ALL DEMOS COMPLETED ---")
 
     # -----------------------------------------------------------------------------------------------
     # --- DIRECTIVE GAMMA: RUN COGNITIVE GYM STRESS TESTS
@@ -647,3 +646,5 @@ if __name__ == '__main__':
     run_euphoria_test(MASTER_VERBOSE_LEVEL)
     run_sisyphean_test(MASTER_VERBOSE_LEVEL)
     run_amnesia_test(MASTER_VERBOSE_LEVEL)
+
+  print("\n\n--- ALL DEMOS COMPLETED ---")
