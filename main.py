@@ -9,8 +9,10 @@ import numpy as np
 import random
 import time
 import copy
+import pygame
 
 # New modular imports
+from environment import SimpleGridworld, PerceptionSystem
 from cognitive_engine import SimplifiedOrchOREmulator, CoAgentManager, CognitiveAgentTrainer
 from core_abstractions import GoalState, WorkingMemoryItem, StateHandle
 from universe_definitions import TWO_QUBIT_UNIVERSE_CONFIG, STATE_00, STATE_01, STATE_10, STATE_11
