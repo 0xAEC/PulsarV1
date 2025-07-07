@@ -21,16 +21,13 @@ DEFAULT_INTERNAL_PARAMS = {
     'sensor_input_noise_level': 0.01, # Chance for a bit in sensor input to flip
     'ltm_mutation_on_replay_rate': 0.02, # Chance to mutate LTM sequence on replay
     'ltm_mutation_on_store_rate': 0.01, # Chance to mutate LTM sequence metr`ics on store
-    # New: for temporal feedback grid bias strength (Feature 2)
     'temporal_feedback_valence_bias_strength': 0.1, # How much avg past valence delta affects strategy
     'temporal_feedback_entropy_bias_strength': 0.05, # How much avg past entropy shift affects strategy
-    # New: for SMN, parameters defining behavior of self-mutation
     'smn_positive_valence_threshold': 0.6, # Valence above which SMN considers "good" for perturbation/stability
     'smn_negative_valence_threshold': -0.4, # Valence below which SMN considers "bad" for instability
     'smn_mutation_strength_decay': 0.99, # Factor to decay mutation strength on good valence
     'smn_mutation_strength_grow': 1.01, # Factor to grow mutation strength on bad valence
     'smn_perturbation_scale_factor': 0.05, # General scale of SMN param perturbations (multiplied by specific strength)
-    # New: For Cognitive Firewall
     'firewall_check_interval': 7, # How often to run firewall checks
     'firewall_cooldown_period': 15, # Cycles before firewall can trigger again
     'firewall_low_valence_threshold': -0.7, # Persistent low valence triggers firewall
@@ -39,16 +36,13 @@ DEFAULT_INTERNAL_PARAMS = {
     'firewall_loop_min_repetitions': 3,    # How many times a state/op must repeat
     'firewall_premature_collapse_threshold_orp': 0.3, # ORP below which collapse is too early
     'firewall_premature_collapse_duration': 4, # Num cycles of premature collapse
-    # New: For Interrupt Handlers
     'interrupt_strong_consolidation_valence_threshold': 0.8,
     'interrupt_strong_consolidation_orp_surprise_factor': 1.5, # if orp > expected * factor
     'interrupt_reactive_ltm_valence_threshold': -0.6,
     'interrupt_cognitive_fork_valence_threshold': 0.85,
-    # For LTM Contextual Recall
     'ltm_goal_context_match_bonus': 0.15, # Bonus to utility if LTM entry context matches active goal
     'ltm_initial_state_match_bonus': 0.10, # Bonus if LTM sequence starts from current agent state
     'ltm_input_context_match_bonus': 0.05, # Bonus if LTM sequence was learned for similar input context
-    # ADV_REASONING_FEATURE_1: Conceptual Layer
     'concept_state_handle_map': {},  # E.g., {'HAPPY_PLACE': StateHandle('11'), 'TOOL_FOUND': StateHandle('01')}
     'ltm_active_concept_match_bonus': 0.12, # Bonus if LTM sequence active concepts match current concepts
     'clear_active_concepts_each_cycle': True, # If true, concepts are based purely on current collapsed state. If false, they persist until changed.
@@ -57,6 +51,10 @@ DEFAULT_INTERNAL_PARAMS = {
     'enable_hierarchical_planning': True,
     'enable_analogical_planning': True,
     'analogical_planning_similarity_threshold': 0.75, # Min score to consider an LTM entry analogous
+    # == NEW PARAMS FOR DIRECTIVE KAPPA-PRIME ==
+    'planning_mental_trial_limit': 3,               # Max "thinking" attempts when physically stuck
+    'ltm_physical_plan_confidence_threshold': 0.4,  # Min confidence to recall a physical plan
+    'ltm_physical_plan_closeness_bonus_factor': 0.1, # Penalty factor for plans starting far away
 }
 
 DEFAULT_METACOGNITION_PARAMS = {
