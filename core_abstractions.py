@@ -44,22 +44,28 @@ class LogEntry:
 # ---------------------------------------------------------------------------
 # State Abstraction Layer (The "Soul" That Can Inhabit Any "Body")
 # ---------------------------------------------------------------------------
-class StateHandle(NamedTuple):
+
+@dataclass(frozen=True)
+class StateHandle:
     """
     An abstract, hashable handle for a state in the universe.
-    The agent's cognitive logic should operate on these handles, not on
-    their underlying string representations, allowing the cognitive architecture
-    to be independent of the specific problem space (e.g., bitstrings, colors, etc.).
+    The agent's cognitive logic should operate on these handles. By using a
+    dataclass, it can carry both a qualitative `id` for high-level reasoning
+    and a `properties` dictionary for quantitative data needed by planners.
+    The `frozen=True` flag makes instances of this class hashable, which is
+    a critical requirement for use in dictionaries and sets.
     """
     id: str
+    properties: Dict = field(default_factory=dict, hash=False, compare=False)
 
     def __str__(self) -> str:
         # A more user-friendly representation for printing and logging.
-        return f"State({self.id})"
+        props_str = f", {len(self.properties)} props" if self.properties else ""
+        return f"State({self.id}{props_str})"
 
     def __repr__(self) -> str:
         # The formal representation, good for debugging.
-        return f"StateHandle(id='{self.id}')"
+        return f"StateHandle(id='{self.id}', properties={self.properties})"
 
 
 # -----------------------------------------------------------------------------------------------
