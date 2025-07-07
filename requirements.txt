@@ -1,1 +1,5 @@
-
+# requirements.txt
+pygame
+gymnasium
+numpy
+tensorflow
