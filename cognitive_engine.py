@@ -13,8 +13,11 @@ import time
 import random
 import collections 
 import traceback 
+import heapq
 import math 
-from typing import List, Dict, Any, Deque, Optional, Tuple, Callable
+from typing import List, Dict, Any, Deque, Optional, Tuple
+import gymnasium as gym 
+from environment import PerceptionSystem 
 
 from core_abstractions import StateHandle, WorkingMemoryItem, WorkingMemoryStack, GoalState, LogEntry
 from configurations import (
@@ -36,7 +39,7 @@ from configurations import (
 # Class Definition: SimplifiedOrchOREmulator
 # ---------------------------------------------------------------------------
 class SimplifiedOrchOREmulator:
-# --- START: COMPLETE AND CORRECTED __init__ METHOD ---
+
 
 # --- START: COMPLETE AND CORRECTED __init__ METHOD ---
 
@@ -58,12 +61,28 @@ class SimplifiedOrchOREmulator:
                  working_memory_max_depth=20,
                  config_overrides=None,
                  verbose=0,
-                 # The kwargs catch-all handles unused keys from unpacked dicts, like 'name' from the universe
+                 # NEW EMBODIMENT PARAMETERS
+                 action_space: gym.spaces.Discrete = None,
+                 perception_system: PerceptionSystem = None,
+                 # The kwargs catch-all handles unused keys from unpacked dicts
                  **kwargs): 
 
         self.agent_id = agent_id
         self.verbose = verbose
+
+        # --- NEW: Mind-Body Connection ---
+        if action_space is None or perception_system is None:
+            raise ValueError("An embodied agent requires both 'action_space' and 'perception_system'.")
+        self.action_space = action_space
+        self.perception_system = perception_system
+        self.current_action_plan: Deque[int] = collections.deque()
+        self.last_executed_plan: Optional[List[int]] = None
+        self.pending_physical_action: Optional[int] = None
+        self.last_action_context: Optional[Dict] = None
+        self.last_perceived_state: Optional[StateHandle] = None
+        self.internal_thought_result: Optional[Dict] = None # Stores outcome of abstract computations
         
+        # --- PRE-EXISTING INITIALIZATION LOGIC (largely unchanged) ---
         if universe is None:
             raise ValueError("A 'universe' configuration dictionary must be provided.")
         self.universe = universe
@@ -73,18 +92,17 @@ class SimplifiedOrchOREmulator:
         self.logical_superposition = {"00": 0j, "01": 0j, "10": 0j, "11": 0j}
         self.logical_superposition[start_comp_basis] = 1.0 + 0j
         self.collapsed_computational_state_str = start_comp_basis
-        self.current_conceptual_state = self.universe['start_state']
+        self.current_conceptual_state = self.universe['start_state'] # Internal state
 
         self.objective_reduction_potential = 0.0
         self.E_OR_THRESHOLD = initial_E_OR_THRESHOLD
         self.orp_decay_rate = initial_orp_decay_rate
 
-        self.operation_costs = {'X': 0.1, 'Z': 0.1, 'H': 0.3, 'CNOT': 0.4, 'CZ': 0.4, 'ERROR_PENALTY': 0.05, 'PLANNING_BASE': 0.02}
+        self.operation_costs = {'X': 0.1, 'Z': 0.1, 'H': 0.3, 'CNOT': 0.4, 'CZ': 0.4, 'ERROR_PENALTY': 0.05, 'PLANNING_BASE': 0.02, "MOVE": 0.05, "PHYSICAL_MOVE": 0.01}
         self.last_cycle_valence_raw = 0.0
         self.last_cycle_valence_mod = 0.0
         self.current_orp_before_reset = 0.0
 
-        # === START OF CORRECTED CONFIGURATION LOADING ===
         self.internal_state_parameters = copy.deepcopy(DEFAULT_INTERNAL_PARAMS) if internal_state_parameters_config is None else copy.deepcopy(internal_state_parameters_config)
         self.metacognition_params = copy.deepcopy(DEFAULT_METACOGNITION_PARAMS) if metacognition_config is None else copy.deepcopy(metacognition_config)
         self.orp_threshold_dynamics = copy.deepcopy(DEFAULT_ORP_THRESHOLD_DYNAMICS) if orp_threshold_dynamics_config is None else copy.deepcopy(orp_threshold_dynamics_config)
@@ -96,7 +114,6 @@ class SimplifiedOrchOREmulator:
         self.firewall_params = copy.deepcopy(DEFAULT_COGNITIVE_FIREWALL_CONFIG) if cognitive_firewall_config is None else copy.deepcopy(cognitive_firewall_config)
         self.goal_state_config_params = copy.deepcopy(DEFAULT_GOAL_STATE_PARAMS) if goal_state_params is None else copy.deepcopy(goal_state_params)
         self.lot_config_params = copy.deepcopy(DEFAULT_LOT_CONFIG) if lot_config is None else copy.deepcopy(lot_config)
-        # === END OF CORRECTED CONFIGURATION LOADING ===
         
         if self.internal_state_parameters.get('preferred_logical_state'):
              try:
@@ -139,27 +156,23 @@ class SimplifiedOrchOREmulator:
         if trainable_param_values:
             self.update_emulator_parameters(trainable_param_values)
             
-        # === START OF CORRECTION ===
-        # Ensure that after all configs are loaded, the strategy_weights dictionary is complete.
-        # This prevents KeyErrors if a config variation overwrites it with a partial dict.
         if 'strategy_weights' in self.internal_state_parameters:
             for key, default_value in DEFAULT_INTERNAL_PARAMS['strategy_weights'].items():
                 if key not in self.internal_state_parameters['strategy_weights']:
                     self.internal_state_parameters['strategy_weights'][key] = default_value
         else:
             self.internal_state_parameters['strategy_weights'] = copy.deepcopy(DEFAULT_INTERNAL_PARAMS['strategy_weights'])
-        # === END OF CORRECTION ===
-
+        
         self.long_term_memory_capacity = 100
         self.successful_sequence_threshold_valence = 0.5 
 
         self.cycle_history = collections.deque(maxlen=cycle_history_max_len)
         self.current_cycle_num = 0
-        self.next_target_input_state_handle = self.universe['start_state']
+        self.next_target_input_state_handle = self.universe['start_state'] # Retained for non-embodied compatibility, but may not be used.
 
         if self.verbose >= 1:
-            active_features_list = ["TemporalGrid", f"SMN(Graph:{self.smn_config.get('enable_influence_matrix', False)})", "Interrupts", "Firewall", "Goals", "LoT", "WorkingMemory"]
-            print(f"[{self.agent_id}] Orch-OR Emulator Initialized. Universe: '{self.universe['name']}'. Active Features: {', '.join(active_features_list)}.")
+            active_features_list = ["Embodied", "TemporalGrid", f"SMN(Graph:{self.smn_config.get('enable_influence_matrix', False)})", "Interrupts", "Firewall", "Goals", "LoT", "WorkingMemory"]
+            print(f"[{self.agent_id}] Orch-OR Emulator Initialized (EMBODIED). Universe: '{self.universe['name']}'. Active Features: {', '.join(active_features_list)}.")
             print(f"[{self.agent_id}] E_OR_THRESHOLD: {self.E_OR_THRESHOLD:.2f}, ORP Decay Rate: {self.orp_decay_rate:.3f}, WM Depth: {self.working_memory.stack.maxlen}")
             if self.temporal_grid_params.get('max_len',0) > 0:
                 print(f"[{self.agent_id}] Temporal Feedback Grid: Active (maxlen={self.temporal_grid_params['max_len']}, window={self.temporal_grid_params['feedback_window']})")
@@ -690,6 +703,7 @@ class SimplifiedOrchOREmulator:
                     self._log_lot_event("associative", "ltm_update_new_metric_mutation", {"seq":seq_tuple})
 
                 new_entry = {
+                    'type': 'abstract_op_sequence', # Differentiates from physical plans
                     'count': update_strength,
                     'total_valence': current_raw_valence_store, 'avg_valence': current_raw_valence_store / update_strength if update_strength else current_raw_valence_store,
                     'total_orp_cost': current_orp_cost_store * update_strength, 'avg_orp_cost': current_orp_cost_store,
@@ -706,7 +720,6 @@ class SimplifiedOrchOREmulator:
                     'most_frequent_outcome_state': final_collapsed_state_str,
                     'concepts_seen_counts': collections.Counter(self.active_concepts),
                     'most_frequent_concepts_at_store': list(self.active_concepts),
-                    ### NEW: Initialize Epistemic/Confidence fields ###
                     'confidence': 0.0, # Will be calculated after creation
                     'last_successful_use_cycle': self.current_cycle_num if raw_valence > 0 else -1
                 }
@@ -786,6 +799,11 @@ class SimplifiedOrchOREmulator:
         concept_match_bonus_val = self.internal_state_parameters.get('ltm_active_concept_match_bonus', 0.12)
 
         for seq_tuple, data in self.long_term_memory.items():
+            # IMPORTANT: This strategy recall is ONLY for abstract computations.
+            # It must ignore physical plans stored in LTM.
+            if data.get('type') != 'abstract_op_sequence':
+                continue
+
             base_utility = data.get('utility', self._associative_layer_calculate_ltm_entry_utility(data))
             current_effective_utility = base_utility
             applied_bonuses_detail = {'goal': 0.0, 'initial_state': 0.0, 'input_ctx': 0.0, 'concept': 0.0}
@@ -1436,166 +1454,357 @@ class SimplifiedOrchOREmulator:
         exec_thought_log.append(f"  Final proposed next input: {next_handle}.")
         self.next_target_input_state_handle = next_handle
         return next_handle
+    
+        # ----------------------------------------------------------------------------------
+    # --- NEW: MIND-BODY INTERFACE & EMBODIED COGNITIVE CYCLE COMPONENTS ---
+    # ----------------------------------------------------------------------------------
+
+    def _ingest_sensory_data(self, observation: Dict):
+        """Sensory Cortex: Translates raw environmental data into an abstract StateHandle."""
+        perceived_state = self.perception_system.observe_to_state_handle(observation)
+        self.last_perceived_state = perceived_state
+
+        # Dynamically learn about new states if they aren't in the internal universe
+        if perceived_state not in self.universe['states']:
+            self.universe['states'].append(perceived_state)
+            self.universe['valence_map'][perceived_state] = 0.0 # Default neutral valence
+            self.state_handle_by_id[perceived_state.id] = perceived_state
+            if self.verbose >= 2:
+                print(f"  SENSOR.Ingest: Discovered and added new state to universe: {perceived_state}")
+            self._log_lot_event("sensor", "discover_state", {"new_state": str(perceived_state)})
 
 
-    def _executive_update_goal_progress(self, collapsed_outcome_handle, executed_ops):
+    def _plan_path_with_astar(self, start_node: Optional[Tuple[int, int]], goal_node: Optional[Tuple[int, int]], agent_has_key: bool) -> Optional[List[int]]:
+        """
+        Tier 2 Planner: The Logical Mind (Upgraded).
+        A* pathfinding that understands the door-and-key context.
+        """
+        if start_node is None or goal_node is None: return None
+        if start_node == goal_node: return []
+        
+        props = self.last_perceived_state.properties
+        base_obstacles = props.get('obstacles', frozenset())
+        door_loc = props.get('door_loc')
+        grid_size = props.get('grid_size', 10)
+        
+        # Dynamically define obstacles based on key status
+        current_obstacles = set(base_obstacles)
+        if door_loc and not agent_has_key:
+            current_obstacles.add(door_loc)
+
+        self._log_lot_event("planner", "astar_start", {"start": start_node, "goal": goal_node, "has_key": agent_has_key, "door_is_obstacle": door_loc and not agent_has_key})
+        
+        def heuristic(a, b): return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+        open_set = [(heuristic(start_node, goal_node), start_node)]
+        came_from, g_score = {}, {start_node: 0}
+
+        while open_set:
+            _, current = heapq.heappop(open_set)
+
+            if current == goal_node:
+                path_coords = []
+                while current in came_from:
+                    path_coords.append(current)
+                    current = came_from[current]
+                path_coords.reverse()
+                
+                action_plan = []
+                dir_to_action = {(1, 0): 0, (-1, 0): 2, (0, 1): 3, (0, -1): 1}
+                last_coord = start_node
+                for coord in path_coords:
+                    delta = (coord[0] - last_coord[0], coord[1] - last_coord[1])
+                    if delta in dir_to_action:
+                        action_plan.append(dir_to_action[delta])
+                    last_coord = coord
+                if self.verbose >= 1: print(f"  LOGIC (A*): Path found from {start_node} to {goal_node}. Length: {len(action_plan)}.")
+                return action_plan
+
+            for dx, dy in [(1,0), (-1,0), (0,1), (0,-1)]:
+                neighbor = (current[0] + dx, current[1] + dy)
+                if not (0 <= neighbor[0] < grid_size and 0 <= neighbor[1] < grid_size) or neighbor in current_obstacles:
+                    continue
+
+                tentative_g_score = g_score.get(current, float('inf')) + 1
+                if tentative_g_score < g_score.get(neighbor, float('inf')):
+                    # THIS IS THE CORRECTED LINE
+                    came_from[neighbor] = current
+                    g_score[neighbor] = tentative_g_score
+                    f_score = tentative_g_score + heuristic(neighbor, goal_node)
+                    heapq.heappush(open_set, (f_score, neighbor))
+        
+        if self.verbose >= 1: print(f"  LOGIC (A*): Search failed for path from {start_node} to {goal_node} (has_key={agent_has_key}).")
+        return None
+
+    def _generate_physical_plan(self) -> List[int]:
+        """
+        Motor Cortex / Cerebellum: Generates a sequence of physical actions to reach a goal.
+        It first attempts to recall a plan from LTM (habit). If that fails, it uses A* search.
+        Returns a list of action integers, or an empty list if no path is found.
+        """
+        if not (self.current_goal_state_obj and self.last_perceived_state and self.last_perceived_state.properties):
+            if self.verbose >= 2: print("  MOTOR.PlanGen: Missing goal, perception, or properties. Cannot generate plan.")
+            return []
+
+        goal_step = self.current_goal_state_obj.steps[self.current_goal_state_obj.current_step_index]
+        goal_state_handle = goal_step.get("target_state")
+        
+        if not (goal_state_handle and goal_state_handle.properties):
+            if self.verbose >=2: print("  MOTOR.PlanGen: Goal step has no target_state with properties. Cannot generate plan.")
+            return []
+
+        start_node = self.last_perceived_state.properties.get('agent')
+        goal_node = goal_state_handle.properties.get('target')
+        
+        # --- LTM Recall Strategy (Habit Formation) ---
+        # A* is expensive. Let's find a confident, known plan that starts near our current position and ends at the same goal.
+        candidate_plans = []
+        for ltm_key, ltm_entry in self.long_term_memory.items():
+            if isinstance(ltm_key, tuple) and ltm_key[0] == "PHYSICAL_PLAN":
+                # ltm_key = ("PHYSICAL_PLAN", start_coords, goal_coords)
+                plan_start_node, plan_goal_node = ltm_key[1], ltm_key[2]
+
+                if plan_goal_node == goal_node and ltm_entry.get('confidence', 0) > 0.4:
+                    # Manhattan distance from current location to the start of the known plan
+                    distance_to_plan_start = abs(start_node[0] - plan_start_node[0]) + abs(start_node[1] - plan_start_node[1])
+                    if distance_to_plan_start <= 2: # Is the plan's start "close enough" to be useful?
+                        candidate_plans.append({
+                            "plan": ltm_entry['plan'],
+                            "confidence": ltm_entry['confidence'],
+                            "distance": distance_to_plan_start,
+                            # Score prefers high confidence and close-by plans
+                            "score": ltm_entry['confidence'] - (distance_to_plan_start * 0.1)
+                        })
+        
+        if candidate_plans:
+            candidate_plans.sort(key=lambda x: x['score'], reverse=True)
+            best_recalled_plan = candidate_plans[0]
+            
+            # If we're exactly at the start of a known good plan, use it.
+            if best_recalled_plan['distance'] == 0:
+                if self.verbose >= 1: print(f"  MOTOR.PlanGen: Recalling high-confidence plan from LTM. Plan length: {len(best_recalled_plan['plan'])}.")
+                self._log_lot_event("motor", "plan_ltm_recall_exact", {"score": best_recalled_plan['score']})
+                return list(best_recalled_plan['plan'])
+
+            # If we're close, we can generate a small "adapter" plan to get to the start of the big plan
+            # This is a much smaller A* search problem!
+            adapter_plan = self._find_path_astar(start_node, ltm_key[1])
+            if adapter_plan:
+                 if self.verbose >= 1: print(f"  MOTOR.PlanGen: Found nearby plan. Chaining adapter ({len(adapter_plan)} steps) + LTM plan ({len(best_recalled_plan['plan'])} steps).")
+                 self._log_lot_event("motor", "plan_ltm_recall_nearby", {"score": best_recalled_plan['score']})
+                 return adapter_plan + list(best_recalled_plan['plan'])
+
+
+        # --- Fallback to full A* search from current location to final goal ---
+        if self.verbose >= 1: print(f"  MOTOR.PlanGen: LTM miss or no useful plan found. Starting full A* search from {start_node} to {goal_node}.")
+        return self._find_path_astar(start_node, goal_node)
+
+
+    def _find_path_astar(self, start_node: Tuple[int, int], goal_node: Tuple[int, int]) -> List[int]:
+        """A helper method containing just the A* search logic."""
+        self._log_lot_event("motor", "plan_astar_start", {"start": start_node, "goal": goal_node})
+        
+        obstacles = self.last_perceived_state.properties.get('obstacles', frozenset())
+        grid_size = self.last_perceived_state.properties.get('grid_size', 10)
+        
+        def heuristic(a, b):
+            return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+        open_set = [(0, start_node)]
+        heapq.heapify(open_set)
+        came_from = {}
+        g_score = {start_node: 0}
+        
+        while open_set:
+            _, current = heapq.heappop(open_set)
+
+            if current == goal_node:
+                path_coords = []
+                temp = current
+                while temp in came_from:
+                    path_coords.append(temp)
+                    temp = came_from[temp]
+                path_coords.reverse()
+                
+                action_plan = []
+                dir_to_action = {(1, 0): 0, (0, -1): 1, (-1, 0): 2, (0, 1): 3}
+                last_coord = start_node
+                for coord in path_coords:
+                    delta = (coord[0] - last_coord[0], coord[1] - last_coord[1])
+                    action_plan.append(dir_to_action[delta])
+                    last_coord = coord
+                self._log_lot_event("motor", "plan_astar_success", {"path_len": len(action_plan)})
+                return action_plan
+
+            for dx, dy in [(1,0), (-1,0), (0,1), (0,-1)]:
+                neighbor = (current[0] + dx, current[1] + dy)
+                
+                if not (0 <= neighbor[0] < grid_size and 0 <= neighbor[1] < grid_size):
+                    continue
+                if neighbor in obstacles:
+                    continue
+
+                tentative_g_score = g_score.get(current, float('inf')) + 1
+                if tentative_g_score < g_score.get(neighbor, float('inf')):
+                    came_from[neighbor] = current
+                    g_score[neighbor] = tentative_g_score
+                    f_score = tentative_g_score + heuristic(neighbor, goal_node)
+                    heapq.heappush(open_set, (f_score, neighbor))
+        
+        if self.verbose >= 1: print(f"  MOTOR.PlanGen (A* Sub): Search failed. No path from {start_node} to {goal_node}.")
+        self._log_lot_event("motor", "plan_astar_fail", {"start": start_node, "goal": goal_node})
+        return []
+
+    def _process_environmental_feedback(self, reward: float, terminated: bool):
+        """Consequence Module: Processes reward and triggers LTM consolidation upon success."""
+        mood_inertia = 0.9
+        reward_influence = 0.3
+        self.internal_state_parameters['mood'] = np.clip(self.internal_state_parameters['mood'] * mood_inertia + reward * reward_influence, -1.0, 1.0)
+        self.last_cycle_valence_raw = reward
+        self.last_cycle_valence_mod = reward
+        
+        # Check for successful termination WITH a plan context ready for storage.
+        # self.last_executed_plan is now a dictionary containing all we need.
+        if terminated and reward > 0 and isinstance(self.last_executed_plan, dict):
+            context = self.last_executed_plan
+            start_state = context['start_state_handle']
+            full_plan = context['plan_sequence']
+            
+            start_coords = start_state.properties.get('agent_loc')
+            # The goal coordinate is where the agent ended up upon termination.
+            goal_coords = self.last_perceived_state.properties.get('agent_loc')
+            
+            if not all([start_coords, goal_coords, full_plan]):
+                self.last_executed_plan = None # Clear invalid context
+                return
+
+            ltm_key = ("PHYSICAL_PUZZLE_SOLUTION", start_coords, goal_coords)
+            
+            if self.verbose >= 1: print(f"  LTM: Storing successful puzzle solution {ltm_key} (len={len(full_plan)}).")
+
+            entry = self.long_term_memory.get(ltm_key, {
+                'type': 'physical_plan', 'count': 0, 'total_reward': 0.0,
+                'total_plan_length': 0, 'plan': full_plan,
+                'first_cycle': self.current_cycle_num, 'utility': 0.0, 'confidence': 0.0,
+            })
+            
+            entry['count'] += 1
+            entry['total_reward'] += reward 
+            entry['total_plan_length'] += len(full_plan)
+            entry['last_cycle'] = self.current_cycle_num
+            avg_reward = entry['total_reward'] / entry['count']
+            avg_plan_len = entry['total_plan_length'] / entry['count']
+            
+            entry['utility'] = avg_reward - (avg_plan_len * 0.02)
+            entry['confidence'] = np.tanh(entry['count'] / 5.0) * np.clip(avg_reward, 0, 1)
+
+            self.long_term_memory[ltm_key] = entry
+            
+            # CRUCIAL: Clear the context after it has been used for learning
+            self.last_executed_plan = None
+
+        self.last_action_context = None # This is now safe to clear every time.
+
+    def _formulate_physical_plan(self) -> Optional[List[int]]:
+        """
+        Hierarchical Master Planner (Directive Lambda - Final).
+        Generates a multi-step plan.
+        """
+        props = self.last_perceived_state.properties
+        agent_loc = props['agent_loc']
+        target_loc = props['target_loc']
+        has_key = props['agent_has_key']
+
+        full_plan = None
+        plan_to_key = []
+
+        if self.verbose >= 1: print(f"  PLANNER: Attempting path to target {target_loc} (has_key={has_key}).")
+        final_plan = self._plan_path_with_astar(agent_loc, target_loc, has_key)
+        
+        if final_plan is not None:
+            full_plan = final_plan
+            if self.verbose >= 1: print("  PLANNER: Direct path found.")
+        else:
+            key_loc = props.get('key_loc')
+            if not has_key and key_loc:
+                if self.verbose >= 1: print(f"  PLANNER: Path blocked. SUB-GOAL: GET KEY at {key_loc}.")
+                plan_to_key = self._plan_path_with_astar(agent_loc, key_loc, agent_has_key=False)
+                if plan_to_key is not None:
+                    if self.verbose >= 1: print(f"  PLANNER: Path to key found. Simulating path from key to target.")
+                    plan_from_key_to_target = self._plan_path_with_astar(key_loc, target_loc, agent_has_key=True)
+                    if plan_from_key_to_target is not None:
+                        full_plan = plan_to_key + plan_from_key_to_target
+                        if self.verbose >= 1: print("  PLANNER: Full key -> target path viable. Committing.")
+        
+        if full_plan is not None:
+            # THIS IS THE CRITICAL CHANGE: Attach the context directly to the plan attribute
+            self.last_executed_plan = {
+                "start_state_handle": self.last_perceived_state,
+                "plan_sequence": tuple(full_plan)
+            }
+            self._log_lot_event("planner", "commit", {"plan_len": len(full_plan)})
+            return full_plan
+
+        if self.verbose >= 1: print("  PLANNER: All planning attempts failed.")
+        return None
+    
+    def _execute_abstract_computation(self):
+        """Encapsulates a full cycle of internal, non-physical thought."""
+        if self.verbose >= 1: print(f"  -- Starting Abstract Computation Cycle --")
+        self._log_lot_event("abstract_cycle", "start", {})
+        
+        # Use the current perceived state to seed the computation if possible
+        # For simplicity, we map any non-computational basis state to a default '00'
+        seed_state_str = "00"
+        
+        self._executive_prepare_superposition(seed_state_str)
+        
+        executed_sequence, chosen_op_strategy, _ = self._executive_generate_computation_sequence()
+        
+        self._executive_quantum_computation_phase(executed_sequence)
+        
+        entropy = self._calculate_superposition_entropy()
+        collapsed_comp_str = self._executive_trigger_objective_reduction()
+        collapsed_concept_handle = self.universe['comp_basis_to_state'].get(collapsed_comp_str, self.universe['start_state'])
+        
+        # This thought cycle impacts internal state (mood, etc.) but produces no physical action
+        # It's like daydreaming or problem-solving.
+        self.internal_thought_result = {
+            'outcome': collapsed_concept_handle,
+            'orp_cost': self.current_orp_before_reset,
+            'entropy': entropy
+        }
+
+        # The thought itself has a valence which affects mood
+        self._executive_evaluate_outcome_and_update_mood(
+            collapsed_concept_handle,
+            self.current_orp_before_reset,
+            entropy,
+            len(executed_sequence or [])
+        )
+
+        if self.verbose >= 1:
+            print(f"  -- Abstract Computation Cycle End. Outcome: {collapsed_concept_handle}, Mood now: {self.internal_state_parameters['mood']:.2f} --")
+        self._log_lot_event("abstract_cycle", "end", {"outcome": str(collapsed_concept_handle), "mood": self.internal_state_parameters['mood']})
+
+
+    def _executive_update_goal_progress(self, relevant_state_handle: StateHandle, context_info: Optional[Dict]):
         if not (self.current_goal_state_obj and self.current_goal_state_obj.status == "active"):
             return
 
         goal = self.current_goal_state_obj
-        step_idx = goal.current_step_index
+        if not (0 <= goal.current_step_index < len(goal.steps)): return
 
-        if not (0 <= step_idx < len(goal.steps)):
-            if self.verbose >= 1: print(f"[{self.agent_id}] Goal Error: Invalid step index {step_idx} for goal '{goal.current_goal}' (NumSteps: {len(goal.steps)})")
-            self._log_lot_event("executive", "goalprogress_error", {"goal_name": goal.current_goal, "error": "invalid_step_idx", "step_idx":step_idx, "num_steps_in_goal": len(goal.steps)})
-            goal.status = "failed"; goal.history.append({"cycle": self.current_cycle_num, "event": "error_invalid_step_idx", "step_index_at_event": step_idx})
-            self.last_cycle_valence_mod = np.clip(self.last_cycle_valence_mod + self.goal_state_config_params['failure_valence_penalty'], -1.0, 1.0)
-            
-            if not self.working_memory.is_empty():
-                top_item = self.working_memory.peek()
-                current_step_name_for_error_pop = goal.steps[step_idx].get("name", f"Step {step_idx + 1}") if 0 <= step_idx < len(goal.steps) else f"InvalidStep{step_idx}"
-                if top_item.type == "goal_step_context" and \
-                   top_item.data.get("goal_name") == goal.current_goal and \
-                   top_item.data.get("goal_step_name") == current_step_name_for_error_pop and \
-                   top_item.data.get("step_index") == step_idx:
-                    popped_item = self.working_memory.pop()
-                    self._log_wm_op("pop_goal_context", item=popped_item, details={"reason": "goal_error_invalid_step_idx"})
-            return
-
-        current_step = goal.steps[step_idx]
-        step_name = current_step.get("name", f"Step {step_idx + 1}")
-        self._log_lot_event("executive", "goalprogress_check", {"goal_name": str(goal.current_goal), "step_name": step_name, "step_idx":step_idx, "outcome_state": str(collapsed_outcome_handle)})
-
-        if current_step.get("requires_explicit_wm_context_push", False):
-            needs_to_push_specific_context_for_this_step = True 
-            if not self.working_memory.is_empty():
-                top_item = self.working_memory.peek()
-                goal_name = goal.current_goal if not isinstance(goal.current_goal, StateHandle) else str(goal.current_goal)
-                if top_item.type == "goal_step_context" and \
-                   top_item.data.get("goal_name") == goal_name and \
-                   top_item.data.get("goal_step_name") == step_name and \
-                   top_item.data.get("step_index") == step_idx:
-                    needs_to_push_specific_context_for_this_step = False
-                    if self.verbose >= 3: print(f"    WM Push Skipped for '{step_name}': Context already on top.")
-                    self._log_lot_event("workingmemory", "push_goal_context_skip_duplicate_top", {
-                        "goal_name": goal_name, "step_name": step_name, "step_idx": step_idx
-                    })
-            
-            if needs_to_push_specific_context_for_this_step:
-                goal_name = goal.current_goal if not isinstance(goal.current_goal, StateHandle) else str(goal.current_goal)
-                wm_item_data = {
-                    "goal_name": goal_name, 
-                    "goal_step_name": step_name, 
-                    "step_index": step_idx,
-                    "collapsed_state_at_eval_time": self.current_conceptual_state.id,
-                }
-                item_to_push = WorkingMemoryItem(type="goal_step_context", data=wm_item_data, 
-                                                 description=f"CtxPush: {goal_name} - {step_name}")
-                item_discarded = self.working_memory.push(item_to_push)
-                self._log_wm_op("push_goal_context", item=item_to_push, 
-                                details={'reason': 'ensure_active_step_context', 
-                                         'item_discarded_on_push': item_discarded})
-
-        achieved_step = False
-        sub_goal_obj = current_step.get("sub_goal")
-        if isinstance(sub_goal_obj, GoalState):
-            if sub_goal_obj.status == "pending":
-                if self.verbose >= 1: print(f"[{self.agent_id}] Activating SubGoal '{sub_goal_obj.current_goal}' for step '{step_name}' of '{goal.current_goal}'")
-                self._log_lot_event("executive", "goalprogress_subgoal_activate", {"parent_goal": str(goal.current_goal), "sub_goal":str(sub_goal_obj.current_goal)})
-                sub_goal_obj.status = "active"
-            
-            if sub_goal_obj.status == "completed": 
-                achieved_step = True
-                if self.verbose >=1: print(f"[{self.agent_id}] SubGoal '{sub_goal_obj.current_goal}' previously completed for step '{step_name}'. Step for parent achieved.")
-                self._log_lot_event("executive", "goalprogress_subgoal_eval_complete", {"parent_goal": str(goal.current_goal), "sub_goal":str(sub_goal_obj.current_goal)})
-            elif sub_goal_obj.status == "failed":
-                 if self.verbose >=1: print(f"[{self.agent_id}] SubGoal '{sub_goal_obj.current_goal}' previously failed for step '{step_name}'. Step fails for parent.")
-                 goal.history.append({"cycle": self.current_cycle_num, "event": f"step_failed_due_to_subgoal", "step_name": step_name, "subgoal_name": str(sub_goal_obj.current_goal), "current_step_index_at_event": goal.current_step_index})
-
-        if not achieved_step and current_step.get("target_state") and collapsed_outcome_handle == current_step["target_state"]:
-            achieved_step = True
-            if self.verbose >=1: print(f"[{self.agent_id}] Goal '{goal.current_goal}': Step '{step_name}' achieved via target state {collapsed_outcome_handle}.")
-        elif not achieved_step and callable(current_step.get("completion_criteria")):
-            try:
-                context_for_callable = {
-                    'collapsed_state': collapsed_outcome_handle,
-                    'ops': executed_ops, 
-                    'agent_public_state': self.get_public_state_summary(), 
-                    'working_memory': self.working_memory, 
-                    'current_goal_obj': goal, 
-                    'current_step_obj': current_step, 
-                }
-                if current_step["completion_criteria"](context_for_callable):
-                    achieved_step = True
-                    if self.verbose >=1: print(f"[{self.agent_id}] Goal '{goal.current_goal}': Step '{step_name}' achieved via custom criteria.")
-            except Exception as e:
-                if self.verbose >=1: print(f"[{self.agent_id}] Error in goal step completion_criteria for '{step_name}': {e}")
-                self._log_lot_event("executive", "goalprogress_criteria_error", {"step_name":step_name, "error_str":str(e)})
+        current_step = goal.steps[goal.current_step_index]
+        step_name = current_step.get("name", "Unnamed Step")
         
-        pop_reason_details = ""
-        if achieved_step:
-            goal.history.append({"cycle": self.current_cycle_num, "event": f"step_completed", "step_name": step_name, "outcome_state":str(collapsed_outcome_handle), "current_step_index_at_event": goal.current_step_index})
-            self.last_cycle_valence_mod = np.clip(self.last_cycle_valence_mod + self.goal_state_config_params['step_completion_valence_bonus'], -1.0, 1.0)
-            goal.current_step_index += 1 
-            num_steps = len(goal.steps)
-            goal.progress = goal.current_step_index / num_steps if num_steps > 0 else 1.0
-            self._log_lot_event("executive", "goalprogress_step_complete", {"step_name": step_name, "new_progress": goal.progress, "valence_mod_bonus":self.goal_state_config_params['step_completion_valence_bonus']})
-            pop_reason_details = "step_achieved"
-
-            if goal.current_step_index >= len(goal.steps):
-                goal.status = "completed"; goal.progress = 1.0
-                if self.verbose >= 1: print(f"[{self.agent_id}] Goal '{goal.current_goal}' COMPLETED!")
-                self._log_lot_event("executive", "goalprogress_goal_complete", {"goal_name": str(goal.current_goal), "valence_mod_bonus":self.goal_state_config_params['completion_valence_bonus']})
-                self.last_cycle_valence_mod = np.clip(self.last_cycle_valence_mod + self.goal_state_config_params['completion_valence_bonus'], -1.0, 1.0)
-                
-                if self.post_goal_valence_lock_cycles_remaining <= 0: 
-                    self.post_goal_valence_lock_cycles_remaining = self.post_goal_valence_lock_duration
-                    if self.verbose >=1: print(f"    EXECUTIVE.GoalProgress: Post-goal valence lock initiated for {self.post_goal_valence_lock_duration} cycles at value {self.post_goal_valence_lock_value:.2f}.")
-                    self._log_lot_event("executive", "goalprogress_post_goal_lock_set", {
-                        "duration": self.post_goal_valence_lock_duration, 
-                        "lock_value": self.post_goal_valence_lock_value
-                    })
-
-                if self.internal_state_parameters['preferred_state_handle'] == current_step.get("target_state"): 
-                    self.internal_state_parameters['preferred_state_handle'] = None 
-            else: 
-                 next_step_index_after_advance = goal.current_step_index
-                 next_step_name = goal.steps[next_step_index_after_advance].get("name", f"Step {next_step_index_after_advance+1}")
-                 if self.verbose >= 1: print(f"[{self.agent_id}] Goal '{goal.current_goal}': Advanced to step '{next_step_name}'.")
-        else: 
-            goal.history.append({"cycle": self.current_cycle_num, "event": "step_no_progress", "step_name": step_name, "current_outcome": str(collapsed_outcome_handle), "current_step_index_at_event": goal.current_step_index})
-            max_cycles_on_step_val = current_step.get("max_cycles_on_step", float('inf'))
-            
-            cycles_on_this_step_count = 0
-            for hist_entry in reversed(goal.history):
-                if hist_entry.get("current_step_index_at_event") != goal.current_step_index :
-                    break 
-                if hist_entry.get("step_name") == step_name:
-                    cycles_on_this_step_count +=1
-            
-            if cycles_on_this_step_count >= max_cycles_on_step_val :
-                 if self.verbose >= 1: print(f"[{self.agent_id}] Goal '{goal.current_goal}' FAILED due to too many cycles ({cycles_on_this_step_count}) on step '{step_name}'. Max was {max_cycles_on_step_val}")
-                 self._log_lot_event("executive", "goalprogress_goal_fail", {"goal_name":str(goal.current_goal), "reason":f"max_cycles_on_step_{step_name}", "cycles_spent": cycles_on_this_step_count, "max_allowed":max_cycles_on_step_val})
-                 goal.status = "failed"
-                 self.last_cycle_valence_mod = np.clip(self.last_cycle_valence_mod + self.goal_state_config_params['failure_valence_penalty'], -1.0, 1.0)
-                 pop_reason_details = "step_failed_max_cycles"
-
-        if pop_reason_details: 
-            if not self.working_memory.is_empty():
-                top_item = self.working_memory.peek()
-                goal_name = goal.current_goal if not isinstance(goal.current_goal, StateHandle) else str(goal.current_goal)
-                if top_item.type == "goal_step_context" and \
-                   top_item.data.get("goal_name") == goal_name and \
-                   top_item.data.get("goal_step_name") == step_name and \
-                   top_item.data.get("step_index") == step_idx: 
-                    popped_item = self.working_memory.pop()
-                    self._log_wm_op("pop_goal_context", item=popped_item, details={"reason": pop_reason_details})
-        
-        if goal.status in ["completed", "failed"]:
-            final_step_details = current_step 
-            if self.internal_state_parameters['preferred_state_handle'] == final_step_details.get("target_state"):
-                 self.internal_state_parameters['preferred_state_handle'] = None
-                 self._log_lot_event("executive", "goalprogress_clear_pref_state_on_goal_end", {"goal_status": goal.status, "related_target_state": str(final_step_details.get("target_state")), "step_name_involved": final_step_details.get("name")})
+        # The single success condition is reaching the final target state.
+        if current_step.get("target_state") and relevant_state_handle.id == current_step["target_state"].id:
+            goal.status = "completed"
+            goal.progress = 1.0
+            self.last_cycle_valence_mod += self.goal_state_config_params.get('completion_valence_bonus', 0.5)
+            self._log_lot_event("goal_tracking", "success", {"goal": goal.current_goal, "state": relevant_state_handle.id})
+            if self.verbose >= 1: print(f"[{self.agent_id}] Goal '{goal.current_goal}' Marked as COMPLETED.")
 
 
 
@@ -2148,10 +2357,11 @@ class SimplifiedOrchOREmulator:
         intervention_reason = "None"
         intervention_details = {}
 
+        # Low valence check (This logic is universal and remains correct)
         low_val_streak_needed = self.firewall_params['low_valence_streak_needed']
         if not intervention_made and len(self.cycle_history) >= low_val_streak_needed:
-            recent_valences = [c['valence_mod_this_cycle'] for c in list(self.cycle_history)[-low_val_streak_needed:]]
-            if all(v < self.firewall_params['low_valence_threshold'] for v in recent_valences):
+            recent_valences = [c['valence_mod_this_cycle'] for c in list(self.cycle_history)[-low_val_streak_needed:] if 'valence_mod_this_cycle' in c]
+            if len(recent_valences) == low_val_streak_needed and all(v < self.firewall_params['low_valence_threshold'] for v in recent_valences):
                 intervention_reason = f"Persistent Low Valence (avg {np.mean(recent_valences):.2f} < {self.firewall_params['low_valence_threshold']} for {low_val_streak_needed} cycles)"
                 self.internal_state_parameters['exploration_mode_countdown'] = max(
                     self.internal_state_parameters['exploration_mode_countdown'],
@@ -2159,48 +2369,78 @@ class SimplifiedOrchOREmulator:
                 )
                 self.internal_state_parameters['curiosity'] = min(0.99, self.internal_state_parameters['curiosity'] + 0.33)
                 intervention_made = True; intervention_details = {'avg_valence': np.mean(recent_valences), 'streak': low_val_streak_needed}
-
+        
+        # --- START OF CORRECTED LOOP DETECTION LOGIC ---
         loop_window = self.firewall_params['loop_detection_window']
         if not intervention_made and len(self.cycle_history) >= loop_window:
             history_slice = list(self.cycle_history)[-loop_window:]
             behavior_patterns = []
-            for c in history_slice:
-                ops_tuple = tuple(tuple(op) for op in c.get('ops_executed', []))
-                behavior_patterns.append((c['collapsed_to_handle'], c['op_strategy'], ops_tuple))
             
-            counts = collections.Counter(behavior_patterns)
-            for pattern_tuple, count in counts.items():
-                if count >= self.firewall_params['loop_detection_min_repeats']:
-                    loop_valences = [c['valence_mod_this_cycle'] for c, p_tuple in zip(history_slice, behavior_patterns) if p_tuple == pattern_tuple]
-                    if np.mean(loop_valences) < self.firewall_params['low_valence_threshold'] * 0.75 :
-                        intervention_reason = f"Behavioral Loop Detected (pattern {pattern_tuple} repeated {count}x with low avg_val {np.mean(loop_valences):.2f})"
-                        sw = self.internal_state_parameters['strategy_weights']
-                        rand_factor = self.firewall_params['intervention_strategy_randomness_factor']
-                        for k in sw: sw[k] = sw[k] * (1-rand_factor) + random.random() * rand_factor * (1 + sw[k])
-                        valid_sw_values = [v for v in sw.values() if isinstance(v, (int, float))]
-                        total_sw = sum(v for v in valid_sw_values if v > 0)
-                        if total_sw > 1e-6:
-                            for k in sw:
-                                if isinstance(sw[k], (int,float)): sw[k] = max(0,sw[k]/total_sw)
-                        else:
-                            num_strats = len([k for k in sw if isinstance(sw[k],(int,float))]) or 1
-                            for k in sw:
-                                if isinstance(sw[k],(int,float)): sw[k] = 1.0/num_strats
+            # This loop builds a list of patterns based on the type of cycle
+            for c in history_slice:
+                # The 'focus' key was added to the history dict in the new embodied run_cycle
+                focus = c.get('focus')
+                if focus == 'PHYSICAL':
+                    # A physical behavior pattern is (perception, action)
+                    pattern = (c.get('perceived_state_handle'), c.get('action_taken'))
+                    behavior_patterns.append(pattern)
+                elif focus == 'ABSTRACT':
+                    # An abstract behavior pattern is (outcome, strategy, ops)
+                    ops_tuple = tuple(tuple(op) for op in c.get('ops_executed', []))
+                    pattern = (c.get('collapsed_to_handle'), c.get('op_strategy'), ops_tuple)
+                    behavior_patterns.append(pattern)
+                # If 'focus' key is missing (e.g., old history data), we simply skip it for robustness
+                else:
+                    behavior_patterns.append(None) # Append a non-matchable item
+            
+            # The rest of the loop detection logic operates on the generated behavior_patterns
+            if behavior_patterns:
+                counts = collections.Counter(p for p in behavior_patterns if p is not None)
+                for pattern_tuple, count in counts.items():
+                    if count >= self.firewall_params['loop_detection_min_repeats']:
+                        # The valence check logic is universal and works on the history_slice
+                        loop_valences = []
+                        # Correctly find the valences only for cycles that match the found pattern
+                        for i, p_tuple in enumerate(behavior_patterns):
+                            if p_tuple == pattern_tuple:
+                                loop_valences.append(history_slice[i]['valence_mod_this_cycle'])
+                        
+                        if loop_valences and np.mean(loop_valences) < self.firewall_params['low_valence_threshold'] * 0.75:
+                            intervention_reason = f"Behavioral Loop Detected (pattern {str(pattern_tuple)[:80]}... repeated {count}x with low avg_val {np.mean(loop_valences):.2f})"
+                            # The intervention itself (shaking up strategy weights) is fine
+                            sw = self.internal_state_parameters['strategy_weights']
+                            rand_factor = self.firewall_params['intervention_strategy_randomness_factor']
+                            for k in sw: sw[k] = sw[k] * (1-rand_factor) + random.random() * rand_factor * (1 + sw[k])
+                            valid_sw_values = [v for v in sw.values() if isinstance(v, (int, float))]
+                            total_sw = sum(v for v in valid_sw_values if v > 0)
+                            if total_sw > 1e-6:
+                                for k in sw:
+                                    if isinstance(sw[k], (int,float)): sw[k] = max(0,sw[k]/total_sw)
+                            else:
+                                num_strats = len([k for k in sw if isinstance(sw[k],(int,float))]) or 1
+                                for k in sw:
+                                    if isinstance(sw[k],(int,float)): sw[k] = 1.0/num_strats
 
-                        self.internal_state_parameters['preferred_state_handle'] = None
-                        intervention_made = True; intervention_details = {'pattern':str(pattern_tuple), 'count':count, 'avg_loop_val':np.mean(loop_valences)}
-                        break
+                            self.internal_state_parameters['preferred_state_handle'] = None
+                            intervention_made = True
+                            intervention_details = {'pattern':str(pattern_tuple), 'count':count, 'avg_loop_val':np.mean(loop_valences)}
+                            break
+        # --- END OF CORRECTED LOOP DETECTION LOGIC ---
 
+        # Premature collapse check (Only applies to abstract cycles, so needs to be more careful)
         prem_collapse_streak = self.firewall_params['premature_collapse_streak_needed']
         if not intervention_made and len(self.cycle_history) >= prem_collapse_streak:
-            recent_collapse_data = list(self.cycle_history)[-prem_collapse_streak:]
-            threshold_ratios = [c['orp_at_collapse'] / (c['E_OR_thresh_this_cycle']+1e-6) for c in recent_collapse_data if c.get('num_ops_executed',0) > 0]
-            if threshold_ratios and len(threshold_ratios) >= prem_collapse_streak *0.75 and all(ratio < self.firewall_params['premature_collapse_orp_max_ratio'] for ratio in threshold_ratios):
-                 intervention_reason = f"Persistent Premature ORP Collapse (avg ratio {np.mean(threshold_ratios):.2f} < {self.firewall_params['premature_collapse_orp_max_ratio']} for {len(threshold_ratios)} op-cycles)"
-                 self.E_OR_THRESHOLD *= self.firewall_params['intervention_orp_threshold_increase_factor']
-                 self.E_OR_THRESHOLD = min(self.E_OR_THRESHOLD, self.orp_threshold_dynamics['max'])
-                 self.internal_state_parameters['computation_length_preference'] = min(8, max(self.internal_state_parameters['computation_length_preference'] + 1, 2))
-                 intervention_made = True; intervention_details = {'avg_orp_ratio':np.mean(threshold_ratios), 'new_EOR':self.E_OR_THRESHOLD, 'new_comp_pref': self.internal_state_parameters['computation_length_preference']}
+            # Filter for only the abstract computation cycles
+            abstract_cycle_data = [c for c in list(self.cycle_history)[-prem_collapse_streak:] if c.get('focus') == 'ABSTRACT' and 'orp_at_collapse' in c]
+            
+            if len(abstract_cycle_data) >= prem_collapse_streak: # Ensure we have enough data points
+                threshold_ratios = [c['orp_at_collapse'] / (c['E_OR_thresh_this_cycle']+1e-6) for c in abstract_cycle_data if c.get('num_ops_executed',0) > 0]
+                if threshold_ratios and all(ratio < self.firewall_params['premature_collapse_orp_max_ratio'] for ratio in threshold_ratios):
+                     intervention_reason = f"Persistent Premature ORP Collapse (avg ratio {np.mean(threshold_ratios):.2f} < {self.firewall_params['premature_collapse_orp_max_ratio']} for {len(threshold_ratios)} abstract op-cycles)"
+                     self.E_OR_THRESHOLD *= self.firewall_params['intervention_orp_threshold_increase_factor']
+                     self.E_OR_THRESHOLD = min(self.E_OR_THRESHOLD, self.orp_threshold_dynamics['max'])
+                     self.internal_state_parameters['computation_length_preference'] = min(8, max(self.internal_state_parameters['computation_length_preference'] + 1, 2))
+                     intervention_made = True; intervention_details = {'avg_orp_ratio':np.mean(threshold_ratios), 'new_EOR':self.E_OR_THRESHOLD, 'new_comp_pref': self.internal_state_parameters['computation_length_preference']}
 
         if intervention_made:
             if self.verbose >= 1: print(f"[{self.agent_id}] COGNITIVE FIREWALL Activated: {intervention_reason}")
@@ -2336,135 +2576,6 @@ class SimplifiedOrchOREmulator:
             except Exception as e:
                 print(f"Probe ERROR: {e}")
 
-    # --- Main Cognitive Cycle Orchestration ---
-    def run_full_cognitive_cycle(self, intended_conceptual_input:StateHandle, computation_sequence_ops=None):
-        self.current_cycle_num += 1
-        self.current_cycle_lot_stream = []
-        start_time = time.time()
-
-        self._log_lot_event("system", "cycle_start", {"cycle_num":self.current_cycle_num, "intended_input_conceptual": str(intended_conceptual_input), "agent_id":self.agent_id, "current_mood":self.internal_state_parameters['mood'], "current_orp":self.objective_reduction_potential})
-        if self.verbose >= 1: print(f"\n[{self.agent_id}] ===== Cycle {self.current_cycle_num} | Input: {intended_conceptual_input} =====")
-
-        actual_computational_str, actual_conceptual_state = self._sensor_layer_process_input(intended_conceptual_input)
-        if self.verbose >= 2: print(f"  SensorLayer Out: Actual perceived input {actual_conceptual_state} (basis |{actual_computational_str}>) from intended {intended_conceptual_input}")
-
-        self._executive_prepare_superposition(actual_computational_str)
-        
-        executed_sequence, chosen_op_strategy, op_gen_log_details = \
-            self._executive_generate_computation_sequence(ops_provided_externally=computation_sequence_ops)
-
-        if self.verbose >= 1 and executed_sequence:
-             print(f"  ExecutiveLayer OpGen ({chosen_op_strategy}): {len(executed_sequence)} ops planned = {executed_sequence if len(executed_sequence)<5 else str(executed_sequence[:4])+'...'}")
-        elif self.verbose >= 1 and not executed_sequence:
-             print(f"  ExecutiveLayer OpGen ({chosen_op_strategy}): No ops planned.")
-        if self.verbose >=3 and op_gen_log_details:
-            for line_idx,line in enumerate(op_gen_log_details): print(f"    OpGenLog[{line_idx}]: {line}")
-
-        _, or_triggered_early = self._executive_quantum_computation_phase(executed_sequence)
-
-        entropy_at_collapse = self._calculate_superposition_entropy()
-        num_superposition_terms = len([a for a in self.logical_superposition.values() if abs(a) > 1e-9])
-
-        collapsed_comp_str = self._executive_trigger_objective_reduction()
-        collapsed_concept_handle = self.universe['comp_basis_to_state'].get(collapsed_comp_str, self.universe['start_state'])
-        self.current_conceptual_state = collapsed_concept_handle
-        orp_at_collapse = self.current_orp_before_reset
-
-        self._executive_update_active_concepts(collapsed_concept_handle)
-
-        if self.verbose >= 1: print(f"  ExecutiveLayer OR: Collapsed to {collapsed_concept_handle} (basis |{collapsed_comp_str}>) (ORP experienced: {orp_at_collapse:.3f}, Early OR: {or_triggered_early}, Entropy: {entropy_at_collapse:.2f})")
-        
-        raw_valence_of_collapse = self.universe['valence_map'].get(collapsed_concept_handle, -0.15)
-        self._executive_handle_collapse_interrupts(orp_at_collapse, executed_sequence, raw_valence_of_collapse)
-
-        executive_eval_results = self._executive_evaluate_outcome_and_update_mood(
-            collapsed_concept_handle, orp_at_collapse, entropy_at_collapse, len(executed_sequence or [])
-        )
-        if self.verbose >= 1: print(f"  ExecutiveLayer Eval: Val(raw/mod): {self.last_cycle_valence_raw:.2f}/{self.last_cycle_valence_mod:.2f}. Mood: {self.internal_state_parameters['mood']:.2f}, Frust: {self.internal_state_parameters['frustration']:.2f}")
-        if self.verbose >=3 and executive_eval_results.get('thoughts_log'):
-            for line_idx,line in enumerate(executive_eval_results['thoughts_log']): print(f"    AccEvalLog[{line_idx}]: {line}")
-
-        if self.last_cycle_valence_mod > 0.65 and self.shared_attention_foci is not None:
-            self.shared_attention_foci.append({'state': collapsed_concept_handle, 'op_seq': executed_sequence,
-                                               'valence': self.last_cycle_valence_mod, 'agent_id': self.agent_id,
-                                               'cycle': self.current_cycle_num})
-            self._log_lot_event("coagent", "attention_share", {"state":str(collapsed_concept_handle), "valence":self.last_cycle_valence_mod, "ops_count": len(executed_sequence or [])})
-
-        consolidation_bonus = self.smn_internal_flags.pop('ltm_consolidation_bonus_factor', 1.0)
-        
-        state_context_for_ltm = actual_conceptual_state 
-        if self.cycle_history and len(self.cycle_history) > 0:
-            last_hist_entry = self.cycle_history[-1]
-            if last_hist_entry and 'collapsed_to_handle' in last_hist_entry:
-                 state_context_for_ltm = last_hist_entry['collapsed_to_handle']
-            elif 'actual_input_state_handle' in last_hist_entry:
-                 state_context_for_ltm = last_hist_entry['actual_input_state_handle']
-        
-        self._associative_layer_update_ltm(
-            executed_sequence, self.last_cycle_valence_raw, orp_at_collapse, entropy_at_collapse,
-            collapsed_concept_handle,
-            consolidation_factor=consolidation_bonus,
-            initial_state_when_sequence_started=state_context_for_ltm,
-            input_context_when_sequence_started=actual_conceptual_state
-        )
-        if self.verbose >=2 and consolidation_bonus > 1.0 : print(f"  AssociativeLayer LTM Update applied consolidation bonus: {consolidation_bonus:.1f}")
-
-        self._meta_layer_update_cognitive_parameters(orp_at_collapse, len(executed_sequence or []), executive_eval_results, entropy_at_collapse)
-        self._meta_layer_adapt_preferred_state(collapsed_concept_handle, self.last_cycle_valence_mod)
-        if self.verbose >= 1: print(f"  MetaLayer State: Attn={self.internal_state_parameters['attention_level']:.2f},Cur={self.internal_state_parameters['curiosity']:.2f},PrefS={str(self.internal_state_parameters['preferred_state_handle'])}>,Load={self.internal_state_parameters['cognitive_load']:.2f}")
-
-
-        prev_mod_valence_for_smn = self.cycle_history[-1]['valence_mod_this_cycle'] if self.cycle_history else 0.0
-        self._smn_update_and_apply_mutations(self.last_cycle_valence_mod, self.last_cycle_valence_raw, prev_mod_valence_for_smn, orp_at_collapse)
-
-        self._firewall_detect_and_correct_anomalies()
-
-        planning_log = []
-        self._executive_plan_next_target_input(collapsed_concept_handle, executive_eval_results, planning_log)
-        if self.verbose >= 1: print(f"  ExecutiveLayer PlanNext: Proposing {self.next_target_input_state_handle} for next cycle.")
-        if self.verbose >=3 :
-            for line_idx, line in enumerate(planning_log): print(f"    PlanNextLog[{line_idx}]: {line}")
-
-        self.metacognition_params['cycles_since_last_review'] += 1
-        if self.metacognition_params['cycles_since_last_review'] >= self.metacognition_params['review_interval']:
-            self._meta_layer_perform_review()
-
-        prev_cycle_mod_valence_for_tfg = self.cycle_history[-1]['valence_mod_this_cycle'] if self.cycle_history else 0.0
-        valence_delta = self.last_cycle_valence_mod - prev_cycle_mod_valence_for_tfg
-        entropy_shift = entropy_at_collapse - self.last_cycle_entropy_for_delta
-        tfg_ops_entry = tuple(tuple(op) for op in (executed_sequence or []))
-        self.temporal_feedback_grid.append( (tfg_ops_entry, valence_delta, entropy_shift) )
-        self.last_cycle_entropy_for_delta = entropy_at_collapse
-        if self.verbose >=2 : print(f"  TemporalGrid Appended: Ops({len(tfg_ops_entry)}), ValDelta({valence_delta:.2f}), EntShift({entropy_shift:.2f}). Grid size: {len(self.temporal_feedback_grid)}.")
-        self._log_lot_event("temporal_grid", "update", {"ops_count": len(tfg_ops_entry), "val_delta": valence_delta, "ent_shift": entropy_shift, "grid_len":len(self.temporal_feedback_grid)})
-
-        current_cycle_data = {
-            "cycle_num":self.current_cycle_num, "agent_id": self.agent_id,
-            "intended_input_state_handle":intended_conceptual_input, "actual_input_state_handle":actual_conceptual_state,
-            "ops_executed":executed_sequence, "op_strategy":chosen_op_strategy, "num_ops_executed":len(executed_sequence or []),
-            "collapsed_to_comp":collapsed_comp_str, "collapsed_to_handle":collapsed_concept_handle,
-            "orp_at_collapse":orp_at_collapse, "or_triggered_early": or_triggered_early,
-            "num_terms_before_collapse":num_superposition_terms, "entropy_at_collapse":entropy_at_collapse,
-            "valence_raw_this_cycle":self.last_cycle_valence_raw, "valence_mod_this_cycle":self.last_cycle_valence_mod,
-            "mood_after_cycle":self.internal_state_parameters['mood'], "attention_after_cycle":self.internal_state_parameters['attention_level'],
-            "cog_load_after_cycle":self.internal_state_parameters['cognitive_load'], "frustration_after_cycle":self.internal_state_parameters['frustration'],
-            "curiosity_after_cycle":self.internal_state_parameters['curiosity'], "goal_bias_after_cycle":self.internal_state_parameters['goal_seeking_bias'],
-            "preferred_state_after_cycle":str(self.internal_state_parameters.get('preferred_state_handle')),
-            "E_OR_thresh_this_cycle":self.E_OR_THRESHOLD, "orp_decay_this_cycle":self.orp_decay_rate,
-            "exploration_mode_countdown_after_cycle": self.internal_state_parameters['exploration_mode_countdown'],
-            "smn_flags_in_cycle": copy.deepcopy(self.smn_internal_flags),
-            "smn_influence_matrix_sample": self.smn_influence_matrix[:2,:2].tolist() if self.smn_influence_matrix.size > 0 else "N/A", 
-            "goal_state_at_cycle_end": self.current_goal_state_obj.to_dict() if self.current_goal_state_obj else None,
-            "working_memory_summary_at_cycle_end": self.working_memory.to_dict_summary() if self.working_memory else None, 
-            "lot_stream_this_cycle": copy.deepcopy(self.current_cycle_lot_stream)
-        }
-        self.cycle_history.append(current_cycle_data)
-
-        cycle_duration = time.time() - start_time
-        self._log_lot_event("system", "cycle_end", {"duration_ms": cycle_duration * 1000, "next_planned_input_handle": str(self.next_target_input_state_handle), "final_mood": self.internal_state_parameters['mood']})
-        if self.verbose >= 1: print(f"[{self.agent_id}] ===== Cycle {self.current_cycle_num} End (Dur: {cycle_duration:.3f}s, Next: {self.next_target_input_state_handle}) Mood:{self.internal_state_parameters['mood']:.2f} =====")
-
-        return self.next_target_input_state_handle
 
     # --- Helper & Utility ---
     def logical_superposition_str(self):
@@ -2610,61 +2721,66 @@ class SimplifiedOrchOREmulator:
             "working_memory_depth": len(self.working_memory) if self.working_memory else 0,
             "verbose": self.verbose, 
         }
+    
 
-    def run_chained_cognitive_cycles(self, initial_input_str, num_cycles, computation_sequence_ops_template=None, stop_condition=None):
-        if self.verbose >= 0: print(f"\n\n[{self.agent_id}] %%%%% STARTING CHAINED CYCLES (Num: {num_cycles}, Init Input: |{initial_input_str}>) %%%%%")
+    def run_cycle(self, observation: Dict, reward: float, terminated: bool) -> Optional[int]:
+        """
+        The primary cognitive-motor cycle (Directive Lambda - FINAL).
+        Orchestrates perception, learning, and hierarchical planning.
+        """
+        self.current_cycle_num += 1
+        self.current_cycle_lot_stream = []
+        self.internal_thought_result = None
+        start_time = time.time()
+        self._log_lot_event("system", "cycle_start", {"cycle": self.current_cycle_num, "reward_in": reward})
 
-        try:
-            self.next_target_input_state_handle = self.universe['comp_basis_to_state'][initial_input_str]
-        except KeyError:
-            if self.verbose >= 1: print(f"Warning: Initial input string '{initial_input_str}' not a valid state basis. Defaulting to start_state handle.")
-            self.next_target_input_state_handle = self.universe['start_state']
+        # 1. Perception and Learning
+        self._process_environmental_feedback(reward, terminated)
+        self._ingest_sensory_data(observation)
+        if self.verbose >= 1:
+            print(f"\n[{self.agent_id}] Cycle {self.current_cycle_num} | Perceived: {self.last_perceived_state.id} | Has Key: {self.last_perceived_state.properties.get('agent_has_key')} | Frustration: {self.internal_state_parameters['frustration']:.2f}")
 
+        # 2. Background Cognition & Goal Tracking
+        prev_mod_valence_for_smn = self.cycle_history[-1]['valence_mod_this_cycle'] if self.cycle_history else 0.0
+        self._smn_update_and_apply_mutations(self.last_cycle_valence_mod, self.last_cycle_valence_raw, prev_mod_valence_for_smn, orp_at_collapse=0.5)
+        self._firewall_detect_and_correct_anomalies()
+        if self.current_goal_state_obj and self.current_goal_state_obj.status == "active":
+             self._executive_update_goal_progress(self.last_perceived_state, None) # context_info not needed for this version
 
-        for i in range(num_cycles):
-            # === START OF CORRECTION ===
-            # Check stop condition at the beginning of each cycle.
-            if stop_condition and stop_condition(self):
-                if self.verbose >= 1:
-                    print(f">>>> Chained Cycle {i+1}/{num_cycles} for {self.agent_id}: STOP CONDITION MET. Halting chain. <<<<")
-                break
-            # === END OF CORRECTION ===
+        # 3. Planning & Action
+        action_to_take = None
+        focus = "PHYSICAL"
 
-            current_input_handle_for_cycle = self.next_target_input_state_handle
+        is_new_plan = False
+        if not self.current_action_plan:
+            new_plan = self._formulate_physical_plan()
+            if new_plan:
+                self.current_action_plan = collections.deque(new_plan)
+                is_new_plan = True
+        
+        if self.current_action_plan:
+            if is_new_plan:
+                # This is the first step of a new plan, so store the context.
+                self.last_action_context = {'initial_state': self.last_perceived_state}
+            action_to_take = self.current_action_plan.popleft()
+        else:
+            focus = "ABSTRACT"
+            self.internal_state_parameters['frustration'] = min(1.0, self.internal_state_parameters['frustration'] + 0.35)
+            self._execute_abstract_computation()
+            if self.internal_state_parameters['frustration'] >= 0.95:
+                if self.verbose >= 1: print(f"  Decision: MAX FRUSTRATION. Overriding thought with physical exploration.")
+                action_to_take = self.action_space.sample()
+                focus = "EXPLORE"
 
-            if self.verbose >= 1:
-                pref_str = f"{self.internal_state_parameters['preferred_state_handle']}" if self.internal_state_parameters['preferred_state_handle'] else "None"
-                goal_summary = "No Goal"
-                if self.current_goal_state_obj:
-                    step_name = "N/A"
-                    if self.current_goal_state_obj.steps and 0 <= self.current_goal_state_obj.current_step_index < len(self.current_goal_state_obj.steps):
-                         step_name = self.current_goal_state_obj.steps[self.current_goal_state_obj.current_step_index].get('name', 'UnnamedStep')
-                    goal_summary = f"Goal: '{self.current_goal_state_obj.current_goal}' Step: '{step_name}' ({self.current_goal_state_obj.status})"
-                wm_depth_info = f"WMd:{len(self.working_memory)}"
-
-                print(f"\n>>>> Chained Cycle {i+1}/{num_cycles} for {self.agent_id} <<<< Input: {current_input_handle_for_cycle}; Mood:{self.internal_state_parameters['mood']:.2f}; Pref:{pref_str}; {goal_summary}; {wm_depth_info}")
-
-            current_comp_ops = None
-            if isinstance(computation_sequence_ops_template, list) and computation_sequence_ops_template:
-                current_comp_ops = computation_sequence_ops_template[i % len(computation_sequence_ops_template)] if len(computation_sequence_ops_template) > 0 else None
-            elif callable(computation_sequence_ops_template):
-                 current_comp_ops = computation_sequence_ops_template(self, i)
-
-            try:
-                self.run_full_cognitive_cycle(current_input_handle_for_cycle, current_comp_ops)
-                if hasattr(self, 'probe_at_cycle') and self.current_cycle_num >= self.probe_at_cycle:
-                    self._interactive_psych_probe()
-                    del self.probe_at_cycle # Remove probe after it triggers once
-
-            except Exception as e:
-                critical_error_msg = f"CRITICAL EXCEPTION in cycle {self.current_cycle_num} (idx {i+1}) for agent {self.agent_id}: {type(e).__name__} - {e}.AGENT STOPPING."
-                print(critical_error_msg)
-                traceback.print_exc()
-                self._log_lot_event("error", "critical_exception", {"cycle_num_runtime":i+1, "error_type":type(e).__name__, "error_msg":str(e), "traceback_str":traceback.format_exc()[:500]})
-                break
-
-        if self.verbose >= 0: print(f"\n[{self.agent_id}] %%%%% CHAINED CYCLES COMPLETED ({self.current_cycle_num} total cycles for this agent instance) %%%%%");
-        if self.verbose >= 1 : self.print_internal_state_summary(indent=f"  Final State ({self.agent_id}) ")
+        # 4. Cycle Wrap-up
+        cycle_data = {
+            'cycle_num': self.current_cycle_num, 'focus': focus, 'action_taken': action_to_take,
+            'perceived_state_handle': self.last_perceived_state, 'reward_received': reward,
+            'valence_mod_this_cycle': self.last_cycle_valence_mod, 'mood_after_cycle': self.internal_state_parameters['mood'],
+        }
+        self.cycle_history.append(cycle_data)
+        self._log_lot_event("system", "cycle_end", {"duration_ms": (time.time() - start_time) * 1000, "action": action_to_take})
+        return action_to_take
 
 
 # ---------------------------------------------------------------------------
