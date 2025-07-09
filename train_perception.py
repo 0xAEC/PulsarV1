@@ -7,6 +7,7 @@ VisualCortexVAE and the PredictiveWorldModel.
 """
 import os
 import numpy as np
+from tensorflow import keras
 import tensorflow as tf
 from tqdm import tqdm
 
@@ -63,15 +64,17 @@ def train_visual_cortex(experiences, img_size=(64, 64), latent_dim=32, epochs=30
     """Trains the VisualCortexVAE on the collected image data."""
     print("--- Training Visual Cortex (VAE) ---")
     
-    # We only need the state images for VAE training
     images = np.array([exp['state'] for exp in experiences])
-    if images.shape[-1] > 3: # Handle potential alpha channel
+    if images.shape[-1] > 3:
         images = images[...,:3]
 
     print(f"Dataset shape: {images.shape}")
     
     vae = VisualCortexVAE(original_dim=(*img_size, 3), latent_dim=latent_dim)
-    vae.compile(optimizer=tf.keras.optimizers.Adam())
+    vae.compile(optimizer=keras.optimizers.Adam())    
+    # Build the model by passing a single data point before training.
+    if not vae.built:
+        vae.build(input_shape=(None, *img_size, 3))
     
     vae.fit(images, epochs=epochs, batch_size=batch_size)
     
@@ -88,28 +91,26 @@ def train_world_model(vae: VisualCortexVAE, experiences, latent_dim=32, num_acti
     """
     print("--- Training Predictive World Model ---")
     
-    # 1. Convert all images in our experience to latent vectors using the VAE
     print("Converting image data to latent space...")
     states_imgs = np.array([exp['state'] for exp in experiences])
     next_states_imgs = np.array([exp['next_state'] for exp in experiences])
     actions = np.array([exp['action'] for exp in experiences])
 
-    # Batch conversion for efficiency
     latent_states = vae.observe_to_latent_vector(states_imgs).numpy()
     latent_next_states = vae.observe_to_latent_vector(next_states_imgs).numpy()
     
     print(f"Latent state dataset shape: {latent_states.shape}")
 
-    # 2. Prepare dataset for the world model
-    # The input is a tuple of (latent_state, action), and the output is latent_next_state
     actions_one_hot = tf.one_hot(actions, num_actions)
-    
     dataset_X = [latent_states, actions_one_hot]
     dataset_y = latent_next_states
     
-    # 3. Train the world model
     world_model = PredictiveWorldModel(latent_dim=latent_dim, num_actions=num_actions)
-    world_model.compile(optimizer=tf.keras.optimizers.Adam(), loss='mse')
+    world_model.compile(optimizer=keras.optimizers.Adam(), loss='mse')
+
+    # Build the world model before training.
+    if not world_model.built:
+        world_model.build(input_shape=[(None, latent_dim), (None, num_actions)])
     
     world_model.fit(dataset_X, dataset_y, epochs=epochs, batch_size=batch_size, validation_split=0.1)
 
