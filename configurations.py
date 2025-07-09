@@ -7,6 +7,36 @@ configuration dictionaries and should have no class or function definitions.
 """
 
 # ---------------------------------------------------------------------------
+# New Perception, World Model, and Lifelong Learning Defaults (Directive Mu-Prime)
+# ---------------------------------------------------------------------------
+DEFAULT_VAE_CONFIG = {
+    'IMG_SIZE': (64, 64),
+    'LATENT_DIM': 32,
+    'MODEL_PATH': 'visual_cortex.weights.h5',
+}
+
+DEFAULT_WORLD_MODEL_CONFIG = {
+    # Use the filename that Keras 3+ prefers for whole-model saving.
+    # The bootstrap script is updated to save in this format.
+    'MODEL_PATH': 'world_model.weights.h5', # Keeping .h5 as per user's main.py logic
+}
+
+DEFAULT_LIFELONG_LEARNING_CONFIG = {
+    'enabled': True,
+    # The buffer stores experiences for retraining
+    'replay_buffer_capacity': 5000,
+    # These thresholds determine if an experience is "interesting" enough to store
+    'experience_emotion_threshold': 0.7, # Store if abs(valence_mod) > this
+    'experience_surprise_threshold': 2.5, # Store if prediction_error > this
+    # Conditions to trigger a "sleep" (training) cycle
+    'training_trigger_buffer_size': 256, # Train if the buffer has this many new items
+    'training_trigger_idle_cycles': 50, # Train after this many cycles with no goal
+    'cycles_since_idle_trigger': 0, # Internal counter
+    'training_batch_size': 64,
+    'training_epochs_per_cycle': 2, # How many epochs to train for during a sleep cycle
+}
+
+# ---------------------------------------------------------------------------
 # Orch OR Emulator & System Defaults
 # ---------------------------------------------------------------------------
 
@@ -51,10 +81,11 @@ DEFAULT_INTERNAL_PARAMS = {
     'enable_hierarchical_planning': True,
     'enable_analogical_planning': True,
     'analogical_planning_similarity_threshold': 0.75, # Min score to consider an LTM entry analogous
-    # == NEW PARAMS FOR DIRECTIVE KAPPA-PRIME ==
-    'planning_mental_trial_limit': 3,               # Max "thinking" attempts when physically stuck
-    'ltm_physical_plan_confidence_threshold': 0.4,  # Min confidence to recall a physical plan
-    'ltm_physical_plan_closeness_bonus_factor': 0.1, # Penalty factor for plans starting far away
+    # == NEW PARAMS FOR DIRECTIVE KAIZEN-PRIME (UNIFIED REASONING ENGINE) ==
+    'planning_mental_trial_limit': 5,               # Max "thinking" attempts before acting randomly.
+    'ltm_physical_plan_confidence_threshold': 0.3,  # Min confidence to recall a physical plan.
+    'ltm_physical_plan_max_distance': 4.0,          # Max latent distance for a stored plan's start state.
+    'ltm_physical_plan_distance_penalty_factor': 0.05,# Penalty per unit of latent distance.
 }
 
 DEFAULT_METACOGNITION_PARAMS = {
