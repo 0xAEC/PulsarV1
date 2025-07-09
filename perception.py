@@ -6,8 +6,10 @@ It contains the Visual Cortex (a Variational Autoencoder) for perception and the
 Predictive World Model (an LSTM) for imagination.
 """
 
-import tensorflow as tf
+# This is the canonical, most robust way to import Keras
+from tensorflow import keras
 from tensorflow.keras import layers, Model
+import tensorflow as tf
 import numpy as np
 
 # ---------------------------------------------------------------------------
@@ -75,7 +77,7 @@ class VisualCortexVAE(Model):
             reconstruction = self.decoder(z)
             reconstruction_loss = tf.reduce_mean(
                 tf.reduce_sum(
-                    tf.keras.losses.binary_crossentropy(data, reconstruction), axis=(1, 2)
+                    keras.losses.binary_crossentropy(data, reconstruction), axis=(1, 2)
                 )
             )
             kl_loss = -0.5 * (1 + z_log_var - tf.square(z_mean) - tf.exp(z_log_var))
