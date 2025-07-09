@@ -49,23 +49,24 @@ class LogEntry:
 class StateHandle:
     """
     An abstract, hashable handle for a state in the universe.
-    The agent's cognitive logic should operate on these handles. By using a
-    dataclass, it can carry both a qualitative `id` for high-level reasoning
-    and a `properties` dictionary for quantitative data needed by planners.
-    The `frozen=True` flag makes instances of this class hashable, which is
-    a critical requirement for use in dictionaries and sets.
+    The agent's cognitive logic now operates on these handles, which are
+    grounded in the latent space of a self-supervised perception model.
+    The `id` is a hashable representation of the latent vector for use in sets
+    and dictionary keys.
     """
     id: str
+    latent_vector: np.ndarray = field(hash=False, compare=False)
     properties: Dict = field(default_factory=dict, hash=False, compare=False)
 
     def __str__(self) -> str:
         # A more user-friendly representation for printing and logging.
         props_str = f", {len(self.properties)} props" if self.properties else ""
-        return f"State({self.id}{props_str})"
+        # The ID is now a hash, so showing the first few characters is more useful.
+        return f"State(id_hash={self.id[:8]}...{props_str})"
 
     def __repr__(self) -> str:
         # The formal representation, good for debugging.
-        return f"StateHandle(id='{self.id}', properties={self.properties})"
+        return f"StateHandle(id='{self.id}', latent_vector_shape={self.latent_vector.shape}, properties={self.properties})"
 
 
 # -----------------------------------------------------------------------------------------------
@@ -150,22 +151,35 @@ class WorkingMemoryStack:
 # ---------------------------------------------------------------------------
 # GoalState Structure
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# GoalState Structure
+# ---------------------------------------------------------------------------
 class GoalState:
     """
     Represents a structured goal, potentially with multiple steps, sub-goals,
     and complex completion criteria. This is the core data structure for
-    the agent's goal-directed behavior.
+    the agent's goal-directed behavior. It also acts as a "cognitive primer"
+    to influence the agent's reasoning process without explicit commands.
     """
-    def __init__(self, current_goal: Any, steps: List[Dict], error_tolerance: float = 0.05, initial_progress: float = 0.0):
-        # The 'current_goal' is a high-level description or a target StateHandle itself.
-        # Step 'target_state' values should be StateHandle objects.
+    def __init__(self, current_goal: Any, steps: List[Dict], error_tolerance: float = 0.05,
+                 initial_progress: float = 0.0,
+                 # --- New "Cognitive Primer" properties ---
+                 focus_concepts: List[StateHandle] = None,
+                 reasoning_heuristic: str = None, # "ANALOGY", "LOGICAL_DEDUCTION", "CREATIVE_GENERATION"
+                 evaluation_criteria: str = None  # "NOVELTY", "GOAL_COMPLETION"
+                ):
         self.current_goal = current_goal
-        self.steps = steps  # List of step dictionaries
+        self.steps = steps
         self.progress = initial_progress
         self.error_tolerance = error_tolerance
         self.current_step_index = 0
         self.status = "pending"  # pending, active, completed, failed
         self.history = []
+        
+        # New properties to prime the cognitive process
+        self.focus_concepts = focus_concepts if focus_concepts is not None else []
+        self.reasoning_heuristic = reasoning_heuristic
+        self.evaluation_criteria = evaluation_criteria
 
     def to_dict(self):
         """
@@ -178,12 +192,11 @@ class GoalState:
             if callable(s_copy.get("completion_criteria")):
                 s_copy["completion_criteria"] = "callable_function_not_serialized"
             if isinstance(s_copy.get("target_state"), StateHandle):
-                s_copy["target_state"] = repr(s_copy["target_state"])  # Serialize StateHandle to string
-            # If a step itself is a GoalState, recursively serialize
+                s_copy["target_state"] = repr(s_copy["target_state"])
             if isinstance(s_copy.get("sub_goal"), GoalState):
                 s_copy["sub_goal"] = s_copy["sub_goal"].to_dict()
             serializable_steps.append(s_copy)
-        
+
         goal_desc = repr(self.current_goal) if isinstance(self.current_goal, StateHandle) else str(self.current_goal)
 
         return {
@@ -194,20 +207,20 @@ class GoalState:
             "current_step_index": self.current_step_index,
             "status": self.status,
             "history": self.history,
+            "focus_concepts": [str(c) for c in self.focus_concepts],
+            "reasoning_heuristic": self.reasoning_heuristic,
+            "evaluation_criteria": self.evaluation_criteria,
         }
 
     def __str__(self) -> str:
         """Provides a readable string representation of the current goal status."""
-        
+
         def get_step_display(goal, depth=0):
-            """Internal helper to recursively display the current step, including sub-goals."""
-            if depth > 2:  # Limit recursion to prevent absurdly long strings
-                return "..."
+            if depth > 2: return "..."
 
             step_name_display = "None"
             if 0 <= goal.current_step_index < len(goal.steps):
                 current_step = goal.steps[goal.current_step_index]
-                # Default display uses the step 'name', or target StateHandle if name is not present.
                 step_name = current_step.get("name")
                 if not step_name:
                     target = current_step.get("target_state")
@@ -220,7 +233,14 @@ class GoalState:
                     sub_goal_display = get_step_display(sub_goal, depth + 1)
                     return f"{step_name_display} -> (SubGoal: '{sub_goal_desc}', Step: '{sub_goal_display}')"
             return step_name_display
-        
+
         goal_desc_str = self.current_goal if not isinstance(self.current_goal, StateHandle) else str(self.current_goal)
         final_step_display = get_step_display(self)
-        return f"Goal: '{goal_desc_str}' (Step: '{final_step_display}', Progress: {self.progress * 100:.1f}%, Status: {self.status})"
+        
+        primer_str = []
+        if self.reasoning_heuristic: primer_str.append(f"Heuristic:{self.reasoning_heuristic}")
+        if self.evaluation_criteria: primer_str.append(f"Eval:{self.evaluation_criteria}")
+        primer_info = f" Primer[{', '.join(primer_str)}]" if primer_str else ""
+
+        return (f"Goal: '{goal_desc_str}' (Step: '{final_step_display}', "
+                f"Progress: {self.progress * 100:.1f}%, Status: {self.status}){primer_info}")
