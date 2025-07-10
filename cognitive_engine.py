@@ -6,7 +6,6 @@ operational frameworks (Trainer, CoAgentManager). It contains no top-level
 configuration dictionaries; it imports them from `configurations.py` and
 uses them as defaults.
 """
-# CORRECTED and MINIMAL imports for this file
 import tensorflow as tf
 
 from perception import VisualCortexVAE, PredictiveWorldModel 
