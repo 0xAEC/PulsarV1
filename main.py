@@ -96,67 +96,83 @@ if __name__ == '__main__':
     
     print("\n--- Starting Main Life-Cycle Loop ---")
     num_episodes = 10
-    last_action = None
 
-    # === THE CANONICAL, CORRECT MAIN LOOP ===
+
 
     for i_episode in range(num_episodes):
-        print(f"\\n======== Starting Episode {i_episode + 1}/{num_episodes} ========")
+        print(f"\n======== Starting Episode {i_episode + 1}/{num_episodes} ========")
 
-        # 1. Reset the world and get the very first observation.
-        obs, info = env.reset()
+        # 1. Reset the world and get the initial, full state observation.
+        current_full_obs, info = env.reset()
         current_image_obs = env.render()
         
-        # Initialize loop variables
+        # 2. Initialize loop variables.
         reward = 0.0
         terminated = False
+        truncated = False
         
+        # 3. Set the agent's main, persistent goal for the episode.
         agent.set_goal_state(GoalState(
-            current_goal=f"Solve the maze (Episode {i_episode + 1})",
-            steps=[],
+            current_goal=f"Solve Maze Task (E{i_episode+1})",
+            goal_type="MAIN_QUEST",
+            base_priority=0.4,
+            steps=[], # Let the agent decompose the task itself
             evaluation_criteria="GOAL_COMPLETION"
         ))
-        print(f"Agent assigned high-level goal: '{agent.current_goal_state_obj.current_goal}'")
 
+        # 4. Run the episode until termination or timeout.
+        completion_reason = "Timeout"  # Default reason if the loop finishes
+        t = 0
+        for t in range(400): # More steps to allow for juggling priorities
+            
+            # --- AGENT'S TURN: PERCEIVE, THINK, ACT ---
+            action_to_take = agent.run_cycle(
+                raw_image_observation=current_image_obs,
+                last_reward=reward,
+                last_info=info,
+                is_terminated=(terminated or truncated), # Pass a single 'done' flag
+                current_full_obs=current_full_obs
+            )
 
-        for t in range(250): # Give it a bit more time per episode
-            # --- 1. Agent Perceives and Acts ---
-            # The agent's cognitive cycle takes in the result of the LAST action
-            # and the CURRENT view of the world, then decides on the NEXT action.
-            action_to_take = agent.run_cycle(current_image_obs, reward, info, terminated)
-
-            # --- 2. The World Responds ---
-            # If the agent decides on a physical action, we apply it to the environment.
+            # --- ENVIRONMENT'S TURN: UPDATE ---
             if action_to_take is not None:
-                obs, reward, terminated, truncated, info = env.step(action_to_take)
-                current_image_obs = env.render() # Update the view for the next loop
-            else:
-                # Agent chose to "think" or couldn't decide. The world doesn't change.
-                # Reward is 0, nothing has terminated, info is empty.
+                current_full_obs, reward, terminated, truncated, info = env.step(action_to_take)
+                current_image_obs = env.render()
+            else: # Agent is thinking
                 reward = 0.0
                 terminated = False
+                truncated = False
                 info = {}
-                # The visual observation remains the same as the last step.
 
-            # Optional: Add the visualization call here if you want it
-            # draw_minds_eye(agent, mind_window, mind_font)
-            
-            # --- 3. Check for Episode End ---
+            # --- CHECK FOR EPISODE END ---
+            main_goal_is_complete = agent.is_main_goal_completed()
+
             if terminated:
+                completion_reason = "Goal Reached!"
+                break
+            if truncated:
+                completion_reason = "Truncated"
+                break
+            if main_goal_is_complete:
+                completion_reason = "Agent Reported Goal Complete"
                 break
         
         # --- End of Episode Processing ---
-        if terminated:
-            # Process the final successful state one last time
-            agent.run_cycle(current_image_obs, reward, info, terminated)
-            print(f"Episode {i_episode+1} finished after {t+1} timesteps. Goal Reached!")
-        else:
-            print(f"Episode {i_episode+1} finished after {t+1} timesteps. (Timeout)")
+        # Allow the agent to process the final state of the episode.
+        agent.run_cycle(
+            raw_image_observation=current_image_obs,
+            last_reward=reward,
+            last_info=info,
+            is_terminated=(terminated or truncated or main_goal_is_complete),
+            current_full_obs=current_full_obs
+        )
+        print(f"Episode {i_episode+1} finished after {t+1} timesteps. ({completion_reason})")
+
 
         # --- End of Episode Sleep/Training Logic ---
         ll_params = agent.ll_params
         if ll_params.get('enabled', False) and len(agent.experience_replay_buffer) >= ll_params.get('training_batch_size', 64):
-            print(f"\\n[Cognitive Cycle] End of episode. Consolidating memories through sleep/training...")
+            print(f"\n[Cognitive Cycle] End of episode. Consolidating memories through sleep/training...")
             if agent.sleep_train():
                 print("[Cognitive Cycle] ...Training complete. Perception models updated.")
                 agent.visual_cortex.save_weights(agent.vae_params['MODEL_PATH'])
