@@ -6,6 +6,7 @@ operational frameworks (Trainer, CoAgentManager). It contains no top-level
 configuration dictionaries; it imports them from `configurations.py` and
 uses them as defaults.
 """
+# CORRECTED and MINIMAL imports for this file
 import tensorflow as tf
 
 from perception import VisualCortexVAE, PredictiveWorldModel 
@@ -79,6 +80,149 @@ class ExperienceReplayBuffer:
 
     def __len__(self):
         return len(self.buffer)
+    
+
+
+# ---------------------------------------------------------------------------
+# Class Definition: GoalManager
+# ---------------------------------------------------------------------------
+class GoalManager:
+    """
+    The agent's "prefrontal cortex" for life management.
+    Arbitrates between multiple competing goals, selecting the most urgent
+    one for the current cognitive cycle.
+    """
+    def __init__(self, agent_ref):
+        self.agent: 'SimplifiedOrchOREmulator' = agent_ref
+        self.goals: List[GoalState] = []
+        self._survival_goal_active = False
+
+    def update_and_arbitrate(self) -> Optional[GoalState]:
+        """
+        Primary interface. Updates goal list based on world state and
+        then selects the most urgent goal to focus on.
+        """
+        self._update_goals_from_world_state()
+        return self._arbitrate_active_goal()
+
+    def add_goal(self, goal: GoalState):
+        """Adds a new goal to the list, preventing duplicates."""
+        if not any(g.current_goal == goal.current_goal for g in self.goals):
+            goal.status = 'active'
+            self.goals.append(goal)
+            self.agent._log_lot_event("goal_manager", "goal_added", {"goal": str(goal)})
+
+    def set_main_goal(self, goal: GoalState):
+        """Sets the primary, long-term goal, removing any previous main goal."""
+        # Remove any existing main quests
+        self.goals = [g for g in self.goals if g.goal_type != 'MAIN_QUEST']
+        self.add_goal(goal)
+        
+    def _update_goals_from_world_state(self):
+        """Reactively creates/removes goals based on observations."""
+        obs = self.agent.last_full_obs
+        if obs is None:
+            return
+
+        # --- Survival Goal Management ---
+        agent_energy = obs.get('agent_energy', np.array([100.0]))[0]
+        # Use a lower threshold to add the goal to prevent flip-flopping
+        if agent_energy < 80.0 and not self._survival_goal_active:
+            survival_goal = GoalState(
+                current_goal="Maintain Energy",
+                goal_type="SURVIVAL",
+                base_priority=0.8,
+                steps=[{"name": "Recharge", "target_concept": "charging_pad"}]
+            )
+            self.add_goal(survival_goal)
+            self._survival_goal_active = True
+        # Once energy is full, the goal can be considered "completed" for now
+        elif agent_energy >= 99.0 and self._survival_goal_active:
+            self.goals = [g for g in self.goals if g.goal_type != 'SURVIVAL']
+            self._survival_goal_active = False
+            self.agent._log_lot_event("goal_manager", "survival_goal_deactivated", {"energy": agent_energy})
+
+
+        # --- Opportunity Goal Management ---
+        bonus_loc = obs.get('bonus_target_loc')
+        bonus_timer = obs.get('bonus_target_timer', np.array([0]))[0]
+        opportunity_goal_exists = any(g.goal_type == 'OPPORTUNITY' for g in self.goals)
+
+        if bonus_loc is not None and bonus_loc[0] != -1 and not opportunity_goal_exists:
+            opportunity_goal = GoalState(
+                current_goal="Seize Opportunity",
+                goal_type="OPPORTUNITY",
+                base_priority=0.6,
+                steps=[{"name": "Collect Bonus", "target_concept": "bonus_target"}]
+            )
+            self.add_goal(opportunity_goal)
+            self.agent._log_lot_event("goal_manager", "opportunity_goal_activated", {})
+        elif (bonus_loc is None or bonus_loc[0] == -1) and opportunity_goal_exists:
+            # Remove opportunity goal if it no longer exists in the world
+            self.goals = [g for g in self.goals if g.goal_type != 'OPPORTUNITY']
+            self.agent._log_lot_event("goal_manager", "opportunity_goal_deactivated", {})
+
+
+    def _arbitrate_active_goal(self) -> Optional[GoalState]:
+        """Calculates urgency for all active goals and returns the winner."""
+        if not self.goals:
+            return None
+
+        urgency_scores = {}
+        # THE CRITICAL FIX: Only consider goals that are NOT completed or failed.
+        for goal in self.goals:
+            if goal.status in ['active', 'pending']:
+                urgency = self._calculate_urgency(goal)
+                urgency_scores[goal.current_goal] = (urgency, goal)
+        
+        if not urgency_scores:
+            # This can happen if all goals are completed.
+            return None
+
+        # Select the goal with the highest urgency
+        top_goal_name = max(urgency_scores, key=lambda k: urgency_scores[k][0])
+        arbitrated_goal = urgency_scores[top_goal_name][1]
+
+        self.agent._log_lot_event("goal_manager", "arbitration", {
+            "winner": f"{arbitrated_goal.goal_type}:{arbitrated_goal.current_goal}",
+            "winner_urgency": urgency_scores[top_goal_name][0],
+            "contenders": {k: f"{v[0]:.3f}" for k, v in urgency_scores.items()}
+        })
+        return arbitrated_goal
+
+
+    def _calculate_urgency(self, goal: GoalState) -> float:
+        """The core heuristic for calculating goal urgency."""
+        urgency = 0.0
+        obs = self.agent.last_full_obs
+        if obs is None:
+            return goal.base_priority # Fallback
+
+        if goal.goal_type == "SURVIVAL":
+            energy = obs.get('agent_energy', np.array([100.0]))[0]
+            max_energy = 100.0
+            # Urgency skyrockets as energy approaches zero.
+            urgency = goal.base_priority + ((1.0 - (energy / max_energy))**3 * 5.0)
+            
+        elif goal.goal_type == "OPPORTUNITY":
+            timer = obs.get('bonus_target_timer', np.array([0]))[0]
+            max_lifespan = 50.0 # Match env definition
+            # Urgency increases as the opportunity is about to expire.
+            time_pressure = (1.0 - (timer / max_lifespan))**2 * 1.5
+            curiosity_bonus = self.agent.internal_state_parameters['curiosity'] * 0.5
+            urgency = goal.base_priority + time_pressure + curiosity_bonus
+            
+        elif goal.goal_type == "MAIN_QUEST":
+            goal_bias = self.agent.internal_state_parameters['goal_seeking_bias']
+            # NEW: If frustrated, the agent is less inclined to pursue the main quest.
+            frustration_penalty = self.agent.internal_state_parameters['frustration'] * 0.5
+            urgency = goal.base_priority + goal_bias - frustration_penalty
+
+        else: # Default case
+            urgency = goal.base_priority
+
+        return max(0, urgency) # Urgency cannot be negative
+
 
 # ---------------------------------------------------------------------------
 # Class Definition: SimplifiedOrchOREmulator
@@ -126,11 +270,22 @@ class SimplifiedOrchOREmulator:
 
         self.current_action_plan: Deque[int] = collections.deque()
         self.last_perceived_state: Optional[StateHandle] = None # Now grounded in latent space
+        self.last_full_obs: Optional[Dict] = None # NEW: Stores the full, structured observation from env
         self.next_target_input_state_handle: Optional[StateHandle] = None # Fix for legacy abstract recall
         self.last_prediction_error: Optional[float] = None
         self.known_goal_latent_vectors: Dict[str, np.ndarray] = {} # Maps goal descriptions to target latent vectors
-        self.known_concept_vectors: Dict[str, np.ndarray] = {} # Maps concept names to latent vectors
-        self.cycles_stuck_on_step = 0 
+        self.known_concept_vectors: Dict[str, np.ndarray] = {} # Maps concept names to target latent vectors
+        self.cycles_stuck_on_step = 0
+        
+        # --- NEW: Goal Arbitration Engine 
+        self.goal_manager = GoalManager(self)
+        self.last_arbitrated_goal: Optional[GoalState] = None
+        
+        # Ground key concepts that the agent needs to understand for new goals
+        # This is a bit of a "cheat", but necessary for the agent to know what a charging pad is
+        self.known_concept_vectors['charging_pad'] = np.random.randn(DEFAULT_VAE_CONFIG['LATENT_DIM']) * 0.1 
+        self.known_concept_vectors['bonus_target'] = np.random.randn(DEFAULT_VAE_CONFIG['LATENT_DIM']) * 0.1 
+
 
         # Load configurations for the new modules, using defaults if not provided
         self.vae_params = copy.deepcopy(DEFAULT_VAE_CONFIG) if vae_config is None else copy.deepcopy(vae_config)
@@ -228,7 +383,6 @@ class SimplifiedOrchOREmulator:
 
         self.firewall_cooldown_remaining = 0
         self.firewall_cycles_since_last_check = 0
-        self.current_goal_state_obj = None
         self.working_memory = WorkingMemoryStack(max_depth=working_memory_max_depth)
         self.current_cycle_lot_stream = []
         
@@ -259,7 +413,8 @@ class SimplifiedOrchOREmulator:
                 f"Embodied(VAE Latent Dim:{self.vae_params['LATENT_DIM']})", 
                 f"WorldModel(LSTM)", 
                 f"LifelongLearning(Buffer:{self.ll_params['replay_buffer_capacity']})",
-                "SMN", "Firewall", "Goals", "LoT", "WorkingMemory"
+                "GoalArbitration", # NEW
+                "SMN", "Firewall", "LoT", "WorkingMemory"
             ]
             print(f"[{self.agent_id}] Autonomous Orch-OR Emulator Initialized. Active Features: {', '.join(active_features)}.")
 
@@ -357,7 +512,7 @@ class SimplifiedOrchOREmulator:
         # Split source key if it contains dots for checking, e.g., "executive.opgen"
         source_main_category = source_key_lower.split('.')[0]
         
-        # New, simpler check logic based on the directive and old config files' structure
+        # New, simpler check logic based on the command and old config files' structure
         # Log if a specific key `source.type` exists and is true, or if the main category `source` exists and is true
         if not (log_details_config.get(full_key_lower, False) or 
                 log_details_config.get(source_key_lower, False) or
@@ -687,11 +842,9 @@ class SimplifiedOrchOREmulator:
         if not op_sequence: return
         seq_tuple = tuple(tuple(op) for op in op_sequence)
         
-        # Convert StateHandle context to string representations for storage in the Counter
         final_collapsed_state_str = final_collapsed_state.id
         initial_state_str = initial_state_when_sequence_started.id if initial_state_when_sequence_started else "unknown"
         input_context_str = input_context_when_sequence_started.id if input_context_when_sequence_started else "unknown"
-
 
         if raw_valence < self.successful_sequence_threshold_valence * 0.3 and consolidation_factor <= 1.0:
              if self.verbose >=3: print(f"    LTM_Update: Sequence {seq_tuple} not stored, raw_valence {raw_valence:.2f} too low (threshold factor 0.3).")
@@ -700,8 +853,11 @@ class SimplifiedOrchOREmulator:
 
         current_goal_name_for_ltm = None
         current_step_name_for_ltm = None
-        if self.current_goal_state_obj and self.current_goal_state_obj.status == "active":
-            goal = self.current_goal_state_obj
+        
+        # --- ROBUST CONTEXT FETCHING ---
+        # The goal context for abstract thought should come from the currently active arbitrated goal, if any.
+        goal = self.last_arbitrated_goal
+        if goal: # It's okay if this is None during abstract thought
             active_goal_for_context = goal
             if 0 <= goal.current_step_index < len(goal.steps):
                 step_hosting_subgoal = goal.steps[goal.current_step_index]
@@ -712,6 +868,7 @@ class SimplifiedOrchOREmulator:
             if 0 <= active_goal_for_context.current_step_index < len(active_goal_for_context.steps):
                 current_goal_name_for_ltm = active_goal_for_context.current_goal if not isinstance(active_goal_for_context.current_goal, StateHandle) else str(active_goal_for_context.current_goal)
                 current_step_name_for_ltm = active_goal_for_context.steps[active_goal_for_context.current_step_index].get("name", f"Step_{active_goal_for_context.current_step_index}")
+        # --- END ROBUST CONTEXT ---
 
         entry = self.long_term_memory.get(seq_tuple)
         mutation_rate_store = self.internal_state_parameters.get('ltm_mutation_on_store_rate', 0.0)
@@ -758,15 +915,12 @@ class SimplifiedOrchOREmulator:
         else: # New LTM entry
             if len(self.long_term_memory) >= self.long_term_memory_capacity:
                 if not self.long_term_memory: return
-                # Pruning logic now considers confidence as a factor to AVOID pruning high-confidence items
                 min_prune_score = float('inf'); key_to_prune = None
                 for k, v_data in self.long_term_memory.items():
-                    # Score = utility - confidence bonus. Lower score is worse.
                     prune_score = v_data.get('utility', 0) - v_data.get('confidence', 0) * 0.2
                     if prune_score < min_prune_score:
                         min_prune_score = prune_score
                         key_to_prune = k
-
                 if key_to_prune:
                     if self.verbose >=3: print(f"    LTM_Update: LTM full. Pruning {key_to_prune} (prune_score {min_prune_score:.2f}).")
                     self._log_lot_event("associative", "ltm_update_prune", {"pruned_seq_str":str(key_to_prune), "prune_score":min_prune_score})
@@ -784,7 +938,7 @@ class SimplifiedOrchOREmulator:
                     self._log_lot_event("associative", "ltm_update_new_metric_mutation", {"seq":seq_tuple})
 
                 new_entry = {
-                    'type': 'abstract_op_sequence', # Differentiates from physical plans
+                    'type': 'abstract_op_sequence',
                     'count': update_strength,
                     'total_valence': current_raw_valence_store, 'avg_valence': current_raw_valence_store / update_strength if update_strength else current_raw_valence_store,
                     'total_orp_cost': current_orp_cost_store * update_strength, 'avg_orp_cost': current_orp_cost_store,
@@ -801,7 +955,7 @@ class SimplifiedOrchOREmulator:
                     'most_frequent_outcome_state': final_collapsed_state_str,
                     'concepts_seen_counts': collections.Counter(self.active_concepts),
                     'most_frequent_concepts_at_store': list(self.active_concepts),
-                    'confidence': 0.0, # Will be calculated after creation
+                    'confidence': 0.0,
                     'last_successful_use_cycle': self.current_cycle_num if raw_valence > 0 else -1
                 }
                 if current_goal_name_for_ltm:
@@ -817,10 +971,7 @@ class SimplifiedOrchOREmulator:
              entry_ref = self.long_term_memory[seq_tuple]
              entry_ref['utility'] = self._associative_layer_calculate_ltm_entry_utility(entry_ref)
              entry_ref['last_cycle'] = self.current_cycle_num
-             ### NEW: CONFIDENCE UPDATE ###
-             # Confidence is a mix of familiarity (count) and reliability (positive valence).
-             # Tanh provides a nice curve, capping familiarity bonus. Clipped valence ensures negative outcomes don't help confidence.
-             familiarity_score = np.tanh(entry_ref['count'] / 20.0) # Saturates around 20 uses
+             familiarity_score = np.tanh(entry_ref['count'] / 20.0)
              reliability_score = np.clip(entry_ref['avg_valence'], 0, 1.0)
              entry_ref['confidence'] = familiarity_score * reliability_score
              if raw_valence > 0:
@@ -849,20 +1000,21 @@ class SimplifiedOrchOREmulator:
             exec_thought_log.append("LTM recall: LTM empty.")
             return None, current_orp_value
 
-        # Use IDs for matching against LTM data which stores strings
         current_state_str = current_conceptual_state_for_recall_context.id
         current_input_str = current_input_conceptual_context_for_recall.id
-        
-        min_utility_for_recall = 0.05 # Base utility threshold
-        candidate_info = [] # Store (sequence_ops_list, effective_utility, applied_bonuses_dict, original_ltm_data_dict)
+
+        min_utility_for_recall = 0.05
+        candidate_info = []
 
         active_recall_goal_name = None
         active_recall_step_name = None
 
-        current_processing_goal_obj = self.current_goal_state_obj
-
-        if current_processing_goal_obj and current_processing_goal_obj.status == "active":
-            temp_goal_for_context = current_processing_goal_obj
+        # --- THIS IS THE CORRECT, ROBUST LOGIC ---
+        # It's okay for the agent to be "daydreaming" without an active goal.
+        # We only try to get goal context if a goal is actively being pursued.
+        goal_for_context = self.last_arbitrated_goal
+        if goal_for_context and goal_for_context.status == "active":
+            temp_goal_for_context = goal_for_context
             if 0 <= temp_goal_for_context.current_step_index < len(temp_goal_for_context.steps):
                 potential_sub_goal_in_step = temp_goal_for_context.steps[temp_goal_for_context.current_step_index].get("sub_goal")
                 if isinstance(potential_sub_goal_in_step, GoalState) and potential_sub_goal_in_step.status == "active":
@@ -871,17 +1023,14 @@ class SimplifiedOrchOREmulator:
             if 0 <= temp_goal_for_context.current_step_index < len(temp_goal_for_context.steps):
                 active_recall_goal_name = temp_goal_for_context.current_goal if not isinstance(temp_goal_for_context.current_goal, StateHandle) else str(temp_goal_for_context.current_goal)
                 active_recall_step_name = temp_goal_for_context.steps[temp_goal_for_context.current_step_index].get("name", f"Step_{temp_goal_for_context.current_step_index}")
+        # --- END OF CORRECTED LOGIC ---
 
-
-        # Retrieve bonus parameters
         goal_ctx_bonus_val = self.internal_state_parameters.get('ltm_goal_context_match_bonus', 0.15)
         initial_state_bonus_val = self.internal_state_parameters.get('ltm_initial_state_match_bonus', 0.10)
         input_ctx_bonus_val = self.internal_state_parameters.get('ltm_input_context_match_bonus', 0.05)
         concept_match_bonus_val = self.internal_state_parameters.get('ltm_active_concept_match_bonus', 0.12)
 
         for seq_tuple, data in self.long_term_memory.items():
-            # IMPORTANT: This strategy recall is ONLY for abstract computations.
-            # It must ignore physical plans stored in LTM.
             if data.get('type') != 'abstract_op_sequence':
                 continue
 
@@ -889,6 +1038,7 @@ class SimplifiedOrchOREmulator:
             current_effective_utility = base_utility
             applied_bonuses_detail = {'goal': 0.0, 'initial_state': 0.0, 'input_ctx': 0.0, 'concept': 0.0}
 
+            # This check now safely handles the case where there is no active goal name
             if active_recall_goal_name and data.get('last_goal_context_name') == active_recall_goal_name:
                 bonus_val_for_goal_match = goal_ctx_bonus_val * 0.5
                 if data.get('last_goal_context_step') == active_recall_step_name:
@@ -910,13 +1060,11 @@ class SimplifiedOrchOREmulator:
                     stored_concepts_set = set(stored_concepts_list)
                     intersection_size = len(self.active_concepts.intersection(stored_concepts_set))
                     union_size = len(self.active_concepts.union(stored_concepts_set))
-
                     if union_size > 0:
                         jaccard_similarity = intersection_size / union_size
                         concept_bonus = jaccard_similarity * concept_match_bonus_val
                         current_effective_utility += concept_bonus
                         applied_bonuses_detail['concept'] = concept_bonus
-
 
             if current_effective_utility > min_utility_for_recall:
                 projected_cost = sum(self.operation_costs.get(op_data[0].upper(), 0.05) for op_data in seq_tuple)
@@ -924,7 +1072,7 @@ class SimplifiedOrchOREmulator:
                     candidate_info.append( (list(seq_tuple), current_effective_utility, applied_bonuses_detail, data) )
 
         if not candidate_info:
-            exec_thought_log.append(f"LTM recall: No sequences found with effective_utility > {min_utility_for_recall} (after all context bonuses) or all too costly from ORP {current_orp_value:.2f}.")
+            exec_thought_log.append(f"LTM recall: No sequences found with effective_utility > {min_utility_for_recall} (after context bonuses) or all too costly from ORP {current_orp_value:.2f}.")
             return None, current_orp_value
 
         candidate_sequences = [c[0] for c in candidate_info]
@@ -932,34 +1080,34 @@ class SimplifiedOrchOREmulator:
 
         sum_weights = sum(weights)
         if sum_weights <= 1e-6:
-             exec_thought_log.append("LTM recall: No LTM sequences with positive utility weights after filtering (or all weights zero).")
+             exec_thought_log.append("LTM recall: No LTM sequences with positive utility weights after filtering.")
              return None, current_orp_value
 
         normalized_weights = [w / sum_weights for w in weights]
         try:
             chosen_index = random.choices(range(len(candidate_sequences)), weights=normalized_weights, k=1)[0]
         except ValueError as e:
-            exec_thought_log.append(f"LTM recall: Error in weighted choice ({e}). Defaulting to highest utility if possible, or skip.")
+            exec_thought_log.append(f"LTM recall: Error in weighted choice ({e}). Defaulting to highest utility.")
             if candidate_info:
                 chosen_index = max(range(len(candidate_info)), key=lambda i: candidate_info[i][1])
             else: return None, current_orp_value
 
-        chosen_sequence_ops_orig_list = candidate_sequences[chosen_index]
+        chosen_sequence_ops_orig_list = candidate_info[chosen_index][0]
         chosen_sequence_ops_mutable = [list(op) for op in chosen_sequence_ops_orig_list]
-
+        
         bonuses_applied_for_chosen = candidate_info[chosen_index][2]
         original_ltm_data_for_chosen = candidate_info[chosen_index][3]
-
+        
         mutation_rate_replay = self.internal_state_parameters.get('ltm_mutation_on_replay_rate', 0.0)
-        if chosen_sequence_ops_mutable and random.random() < mutation_rate_replay and len(chosen_sequence_ops_mutable) > 0:
+        if chosen_sequence_ops_mutable and random.random() < mutation_rate_replay:
             idx_to_mutate = random.randrange(len(chosen_sequence_ops_mutable))
             op_char, op_arg = chosen_sequence_ops_mutable[idx_to_mutate]
             original_op_tuple_str_in_seq = f"('{op_char}', {op_arg})"
 
             mutation_type_rand = random.random()
-            if mutation_type_rand < 0.35 and op_char in ['X', 'Z', 'H'] and isinstance(op_arg, int): # Flip arg for single qubit
+            if mutation_type_rand < 0.35 and op_char in ['X', 'Z', 'H'] and isinstance(op_arg, int):
                 chosen_sequence_ops_mutable[idx_to_mutate][1] = 1 - op_arg
-            elif mutation_type_rand < 0.65: # Change op type
+            elif mutation_type_rand < 0.65:
                 compatible_ops={'X':['Z','H'],'Z':['X','H'],'H':['X','Z'],'CNOT':['CZ'],'CZ':['CNOT']}
                 new_op_char = random.choice(compatible_ops.get(op_char, ['X','Z','H']))
                 new_op_arg = op_arg
@@ -967,9 +1115,9 @@ class SimplifiedOrchOREmulator:
                 elif new_op_char in ['CNOT', 'CZ']:
                     new_op_arg = tuple(random.sample([0,1],2)) if op_char not in ['CNOT','CZ'] else op_arg
                 chosen_sequence_ops_mutable[idx_to_mutate] = [new_op_char, new_op_arg]
-            elif len(chosen_sequence_ops_mutable) > 1 and random.random() < 0.5 : # Delete an op
+            elif len(chosen_sequence_ops_mutable) > 1 and random.random() < 0.5 :
                 del chosen_sequence_ops_mutable[idx_to_mutate]
-            else: # Insert a new random op
+            else:
                 new_op_insert_char = random.choice(['X','Z','H'])
                 new_op_insert_arg = random.randint(0,1)
                 chosen_sequence_ops_mutable.insert(random.randint(0, len(chosen_sequence_ops_mutable)), [new_op_insert_char, new_op_insert_arg])
@@ -1043,9 +1191,11 @@ class SimplifiedOrchOREmulator:
                 mod_valence += preference_bonus
                 acc_thoughts_log.append(f"Preferred state {current_preferred_state} met, val boosted by {preference_bonus:.2f}.")
 
-        if self.current_goal_state_obj and self.current_goal_state_obj.status == "active":
-             # This now correctly calls the method with just one argument (besides self)
-             self._executive_update_goal_progress(logical_outcome) 
+        # --- CORRECTED GOAL PROGRESS LOGIC ---
+        active_goal_for_eval = self.last_arbitrated_goal
+        if active_goal_for_eval and active_goal_for_eval.status == "active":
+             # During an abstract cycle, the `logical_outcome` is the current conceptual state.
+             self._executive_update_goal_progress(active_goal_for_eval, logical_outcome)
 
         if self.post_goal_valence_lock_cycles_remaining == self.post_goal_valence_lock_duration: 
              if mod_valence != self.post_goal_valence_lock_value :
@@ -1101,88 +1251,74 @@ class SimplifiedOrchOREmulator:
 
     def _executive_generate_computation_sequence(self, ops_provided_externally=None):
         if ops_provided_externally is not None:
-            if self.verbose >= 2: print(f"  EXECUTIVE_LAYER.OpGen: Using externally provided ops: {ops_provided_externally}")
+            if self.verbose >= 2:
+                print(f"  EXECUTIVE_LAYER.OpGen: Using externally provided ops: {ops_provided_externally}")
             self._log_lot_event("executive", "opgen_external", {"ops_count": len(ops_provided_externally)})
             return ops_provided_externally, "StrategyProvidedExternal", ["Ops provided externally."]
 
         exec_thought_log = ["OpGen: Generating new computation sequence:"]
-        self._log_lot_event("executive", "opgen_start", {"orp_current":self.objective_reduction_potential, "threshold": self.E_OR_THRESHOLD})
+        self._log_lot_event("executive", "opgen_start", {"orp_current": self.objective_reduction_potential, "threshold": self.E_OR_THRESHOLD})
 
         ops_sequence = []
         chosen_strategy_name = "NoOpsMethod"
         simulated_orp_accumulator = self.objective_reduction_potential
 
-        # --- Check for explicit plans from Working Memory first ---
-        if not self.working_memory.is_empty():
-            # (WM logic remains the same as before, no changes needed here)
-            ...
-
         effective_attention = self.internal_state_parameters['attention_level']
         cognitive_load_factor = 1.0 - (self.internal_state_parameters['cognitive_load'] * 0.65)
         num_ops_target_base = self.internal_state_parameters['computation_length_preference']
         num_ops_target = max(1, int(np.random.normal(loc=num_ops_target_base * cognitive_load_factor * effective_attention, scale=1.0)))
-        num_ops_target = min(num_ops_target, 10) # Max ops cap
+        num_ops_target = min(num_ops_target, 10)
         exec_thought_log.append(f"  Target ops: ~{num_ops_target} (base:{num_ops_target_base}, load_factor:{cognitive_load_factor:.2f}, attn:{effective_attention:.2f}).")
-        
+
         current_strategy_weights = self.internal_state_parameters['strategy_weights'].copy()
-        
-        # --- NEW: Check for CREATIVE_GENERATION mode from Goal Primer ---
+
+        # --- NEW ROBUST GOAL HANDLING ---
+        # The abstract cycle uses the same `last_arbitrated_goal` as the physical one.
+        # It's okay if this is None; the agent is simply "daydreaming" without a specific focus.
         is_creative_generation_mode = False
-        goal = self.current_goal_state_obj
-        if goal and (goal.reasoning_heuristic == "CREATIVE_GENERATION" or goal.evaluation_criteria == "NOVELTY"):
+        goal_for_context = self.last_arbitrated_goal
+
+        if goal_for_context and (goal_for_context.reasoning_heuristic == "CREATIVE_GENERATION" or goal_for_context.evaluation_criteria == "NOVELTY"):
             is_creative_generation_mode = True
             chosen_strategy_name = "StrategyCreativeGeneration"
             exec_thought_log.append("  OpGen Mode: CREATIVE_GENERATION primed by GoalState.")
-            self._log_lot_event("executive", "opgen_creative_mode", {"heuristic": goal.reasoning_heuristic, "eval": goal.evaluation_criteria})
+            self._log_lot_event("executive", "opgen_creative_mode", {"heuristic": goal_for_context.reasoning_heuristic, "eval": goal_for_context.evaluation_criteria})
 
-            if goal.focus_concepts:
-                exec_thought_log.append(f"    Focusing creative thought on concepts: {[str(c) for c in goal.focus_concepts]}")
-                # We will now generate a sequence specifically to interact with these concepts
-                # A simple "daydreaming" algorithm: apply H to put concepts in superposition, then interact them
-                # Note: This requires mapping concept StateHandles back to their bit strings.
-                for concept_handle in goal.focus_concepts:
+            if goal_for_context.focus_concepts:
+                exec_thought_log.append(f"    Focusing creative thought on concepts: {[str(c) for c in goal_for_context.focus_concepts]}")
+                for concept_handle in goal_for_context.focus_concepts:
                     concept_bit_str = self.universe['state_to_comp_basis'].get(concept_handle)
-                    if not concept_bit_str: continue
-
-                    # Apply Hadamard to each bit of the concept to "open it up"
+                    if not concept_bit_str:
+                        continue
                     if len(concept_bit_str) == 2:
-                        ops_sequence.append(['H', 1]) # bit 1
-                        ops_sequence.append(['H', 0]) # bit 0
-
-                # Add some entanglement or other interactions
-                if len(goal.focus_concepts) > 1 and len(ops_sequence) > 0:
-                     ops_sequence.append(['CNOT', (1, 0)])
-
+                        ops_sequence.append(['H', 1])
+                        ops_sequence.append(['H', 0])
+                if len(goal_for_context.focus_concepts) > 1 and len(ops_sequence) > 0:
+                    ops_sequence.append(['CNOT', (1, 0)])
             else:
-                # Unfocused creativity - random ops but with a 'curiosity' flavor
-                for op_count in range(num_ops_target):
-                    op_c = random.choice(['H', 'H', 'Z', 'CNOT', 'CZ']) # Bias towards superposition/phase
-                    op_a = random.randint(0,1) if op_c in ['Z','H'] else tuple(random.sample([0,1],2))
+                for _ in range(num_ops_target):
+                    op_c = random.choice(['H', 'H', 'Z', 'CNOT', 'CZ'])
+                    op_a = random.randint(0, 1) if op_c in ['Z', 'H'] else tuple(random.sample([0, 1], 2))
                     ops_sequence.append([op_c, op_a])
 
-            was_novel_sequence = True # By definition, this is a new thought.
+            was_novel_sequence = True
 
-        # --- If not in creative mode, proceed with the original logic ---
+        # --- Standard, non-creative thought process ---
         if not is_creative_generation_mode:
-            # --- START OF PREVIOUS LOGIC BLOCK (refactored for flow) ---
-            # ... (the entire block from `active_goal_step_info = None` down to `was_novel_sequence = True`
-            #      and fallback loops can be pasted here, but I will summarize for clarity)
-            # This part handles standard goal-seeking, LTM recall, problem-solving etc.
-            # I will reintegrate the key parts for a complete function.
-        
-            # [Previous logic for handling standard goal steps, hints, LTM recall, problem solving, etc.]
-            # We select a strategy based on weights...
             for key in DEFAULT_INTERNAL_PARAMS['strategy_weights']:
-                if key not in current_strategy_weights: current_strategy_weights[key] = 0.001
-            valid_weights = {k:v for k,v in current_strategy_weights.items() if isinstance(v,(int,float))}
+                if key not in current_strategy_weights:
+                    current_strategy_weights[key] = 0.001
+            valid_weights = {k: v for k, v in current_strategy_weights.items() if isinstance(v, (int, float))}
             total_weight = sum(w for w in valid_weights.values() if w > 0)
+            
             if total_weight <= 1e-6:
                 strategy_choices, strategy_probs = ['curiosity'], [1.0]
             else:
-                strategy_choices, strategy_probs = zip(*[(k, v/total_weight) for k, v in valid_weights.items()])
+                strategy_choices, strategy_probs = zip(*[(k, v / total_weight) for k, v in valid_weights.items()])
+            
             selected_strategy = random.choices(strategy_choices, weights=strategy_probs, k=1)[0]
             exec_thought_log.append(f"  Selected primary strategy: {selected_strategy}")
-            
+
             was_novel_sequence = False
             if selected_strategy == 'memory':
                 replay_ops, _ = self._associative_layer_recall_from_ltm_strategy(
@@ -1193,31 +1329,25 @@ class SimplifiedOrchOREmulator:
                     ops_sequence = replay_ops
                     chosen_strategy_name = "StrategyLTMReplay"
             
-            # ... [problem_solve logic] ...
-
-            if not ops_sequence: 
+            if not ops_sequence:
                 exec_thought_log.append(f"  Using Fallback op generation loop ({selected_strategy}).")
                 chosen_strategy_name = f"StrategyFallbackLoop_{selected_strategy}"
                 was_novel_sequence = True
-                for op_count in range(num_ops_target):
+                for _ in range(num_ops_target):
                     op_c = random.choice(['X', 'Z', 'H', 'CNOT', 'CZ'])
-                    op_a = random.randint(0,1) if op_c in ['X','Z','H'] else tuple(random.sample([0,1],2))
+                    op_a = random.randint(0, 1) if op_c in ['X', 'Z', 'H'] else tuple(random.sample([0, 1], 2))
                     op_cost = self.operation_costs.get(op_c.upper(), 0.05)
                     if simulated_orp_accumulator + op_cost < self.E_OR_THRESHOLD * 0.98:
                         ops_sequence.append([op_c, op_a])
                         simulated_orp_accumulator += op_cost
                     else:
                         break
-            # --- END OF PREVIOUS LOGIC BLOCK ---
 
-        # --- Final Checks (Counterfactual Sim, etc.) on the generated sequence ---
-        simulated_orp_accumulator = self.objective_reduction_potential + sum(self.operation_costs.get(op[0].upper(), 0.05) for op in ops_sequence)
-
+        # --- Final Checks (Counterfactual Sim, etc.) ---
         if ops_sequence and was_novel_sequence and self.internal_state_parameters.get('enable_counterfactual_simulation', True):
             sim_reject_thresh = self.internal_state_parameters.get('counterfactual_sim_reject_threshold', -0.1)
             sim_result = self._reasoning_simulate_counterfactual(ops_sequence, exec_thought_log)
 
-            # In creative mode, we are more tolerant of low valence
             effective_reject_thresh = sim_reject_thresh if not is_creative_generation_mode else sim_reject_thresh * 2.0
 
             if sim_result['is_valid'] and sim_result['estimated_valence'] < effective_reject_thresh:
@@ -1225,11 +1355,11 @@ class SimplifiedOrchOREmulator:
                 ops_sequence = []
                 chosen_strategy_name += "_RejectedBySim"
             else:
-                 chosen_strategy_name += "_VerifiedBySim"
+                chosen_strategy_name += "_VerifiedBySim"
 
         if not ops_sequence and chosen_strategy_name == "NoOpsMethod":
             chosen_strategy_name = "NoOpsGenerated"
-        
+
         self._log_lot_event("executive", "opgen_end", {"ops_generated_count": len(ops_sequence), "strategy": chosen_strategy_name})
         return ops_sequence, chosen_strategy_name, exec_thought_log
 
@@ -1399,10 +1529,12 @@ class SimplifiedOrchOREmulator:
             next_handle = self.universe['start_state']
         exec_thought_log.append(f"  Base heuristic next input: {next_handle}.")
 
-        if self.current_goal_state_obj and self.current_goal_state_obj.status == "active":
-            current_step_idx = self.current_goal_state_obj.current_step_index
-            if 0 <= current_step_idx < len(self.current_goal_state_obj.steps):
-                step_info = self.current_goal_state_obj.steps[current_step_idx]
+        # --- CORRECTED TO USE LAST ARBITRATED GOAL ---
+        active_goal = self.last_arbitrated_goal
+        if active_goal and active_goal.status == "active":
+            current_step_idx = active_goal.current_step_index
+            if 0 <= current_step_idx < len(active_goal.steps):
+                step_info = active_goal.steps[current_step_idx]
                 if isinstance(step_info.get("next_input_for_world"), StateHandle):
                     next_handle = step_info["next_input_for_world"]
                     exec_thought_log.append(f"  GoalStep '{step_info.get('name')}' overrides next input to {next_handle}.")
@@ -1481,6 +1613,20 @@ class SimplifiedOrchOREmulator:
         self._log_lot_event("perception", "ingest", {"state_hash": state_id[:8], "surprise": prediction_error})
         
         return prediction_error
+    
+
+    def _update_internal_world_model(self, current_full_obs: Dict):
+        """
+        Updates the agent's internal, non-visual understanding of the world,
+        like its energy levels or transient environmental states.
+        """
+        if current_full_obs is None:
+            return
+            
+        self.last_full_obs = current_full_obs
+        # Here we could update more sophisticated internal models.
+        # For now, it just ensures the latest obs is available for the GoalManager.
+        self._log_lot_event("perception", "internal_model_update", {"keys_received": list(current_full_obs.keys())})
 
 
 
@@ -1545,8 +1691,9 @@ class SimplifiedOrchOREmulator:
 
         # --- Existing Goal Vector Learning ---
         # This remains important for the shooting planner.
-        if terminated and reward > 0 and self.current_goal_state_obj:
-            goal_desc = self.current_goal_state_obj.current_goal
+        # CORRECTED: Use the last_arbitrated_goal which led to this successful state.
+        if terminated and reward > 0 and self.last_arbitrated_goal:
+            goal_desc = self.last_arbitrated_goal.current_goal
             success_vector = self.last_perceived_state.latent_vector
             self.known_goal_latent_vectors[goal_desc] = success_vector
             self._log_lot_event("learning", "goal_vector_memorized", {"goal": goal_desc})
@@ -1593,54 +1740,69 @@ class SimplifiedOrchOREmulator:
         self._log_lot_event("abstract_cycle", "end", {"outcome": str(collapsed_concept_handle), "mood": self.internal_state_parameters['mood']})
 
 
-    def _executive_update_goal_progress(self, current_state_handle: StateHandle):
-        """Updates goal progress and advances the current step if completed."""
-        if not (self.current_goal_state_obj and self.current_goal_state_obj.status == "active" and self.current_goal_state_obj.steps):
+    def _executive_update_goal_progress(self, goal_to_evaluate: Optional[GoalState], current_state_handle: StateHandle):
+        """
+        Updates a specific goal's progress based on the current state.
+        This version correctly handles both physical ('target_concept') and
+        abstract ('target_state') goal steps.
+        """
+        if not (goal_to_evaluate and goal_to_evaluate.status == "active" and goal_to_evaluate.steps):
             return
 
-        goal = self.current_goal_state_obj
-        # Do not advance if we are already done
+        goal = goal_to_evaluate
         if goal.current_step_index >= len(goal.steps):
-            return
+            return # Goal already finished
 
         current_step = goal.steps[goal.current_step_index]
-        target_concept_name = current_step.get("target_concept")
-        if not target_concept_name or target_concept_name not in self.known_concept_vectors:
-            return
+        step_completed = False
+        log_details = {}
 
-        # Check if the agent is "on" the target concept for the current step
-        target_latent_vector = self.known_concept_vectors.get(target_concept_name)
-        current_latent_vector = current_state_handle.latent_vector
-        distance = np.linalg.norm(current_latent_vector - target_latent_vector)
+        # Determine if the current step is complete
+        target_concept_name = current_step.get("target_concept")
+        target_state_handle = current_step.get("target_state")
+
+        # Case 1: Abstract goal with a specific target StateHandle (typical for reasoning tasks)
+        if target_state_handle and isinstance(target_state_handle, StateHandle):
+            if current_state_handle == target_state_handle:
+                step_completed = True
+                if self.verbose >= 1: print(f"  STEP COMPLETED: [{goal.current_goal}] -> '{current_step.get('name')}' (Matched abstract state: {target_state_handle})")
+                log_details = {"goal": goal.current_goal, "step_name": current_step.get('name'), "match": str(target_state_handle)}
+
+        # Case 2: Physical goal with a visual target concept (typical for embodied tasks)
+        elif target_concept_name and target_concept_name in self.known_concept_vectors:
+            target_latent_vector = self.known_concept_vectors[target_concept_name]
+            current_latent_vector = current_state_handle.latent_vector
+            distance = np.linalg.norm(current_latent_vector - target_latent_vector)
+            completion_threshold = 1.8  # Robustness threshold
+
+            if distance < completion_threshold:
+                step_completed = True
+                if self.verbose >= 1: print(f"  STEP COMPLETED: [{goal.current_goal}] -> '{current_step.get('name')}' (Dist to '{target_concept_name}': {distance:.3f})")
+                log_details = {"goal": goal.current_goal, "step_name": current_step.get('name'), "concept": target_concept_name, "dist": distance}
         
-        completion_threshold = 1.5 # Increased threshold for robustness
-        
-        # Check preconditions for the step, if any
+        # Check preconditions if they exist (future-proofing)
         preconditions_met = True
         if "precondition" in current_step:
-            for key, value in current_step["precondition"].items():
-                 # Check against the agent's internal state/beliefs (which we don't have yet)
-                 # or a proxy. For now, this logic path is un-testable but a placeholder for the future.
-                 pass # For now, we assume they are met if the key exists.
-        
-        if distance < completion_threshold and preconditions_met:
-            self._log_lot_event("goal_tracking", "step_completed", {
-                "step_name": current_step.get('name'), "dist": distance
-            })
-            if self.verbose >= 1:
-                print(f"  STEP COMPLETED: '{current_step.get('name')}' (dist to '{target_concept_name}': {distance:.3f})")
-            
+            pass 
+
+        # If the step is complete, advance the goal state
+        if step_completed and preconditions_met:
+            self._log_lot_event("goal_tracking", "step_completed", log_details)
+            self.cycles_stuck_on_step = 0  # Reset stuck counter
             goal.current_step_index += 1
-            goal.progress = goal.current_step_index / len(goal.steps)
+            goal.progress = goal.current_step_index / len(goal.steps) if goal.steps else 1.0
 
             if goal.current_step_index >= len(goal.steps):
                 goal.status = "completed"
+                # For non-persistent goals, we can now remove them
+                if goal.goal_type in ['OPPORTUNITY', 'SURVIVAL']: # Survival is episodic
+                    self.goal_manager.goals = [g for g in self.goal_manager.goals if g.current_goal != goal.current_goal]
+                
                 self._log_lot_event("goal_tracking", "goal_completed_all_steps", {"goal": goal.current_goal})
                 if self.verbose >= 1: print(f"  GOAL COMPLETED: '{goal.current_goal}' - All steps finished.")
             else:
-                 # Announce the new current step
-                 new_step_info = goal.steps[goal.current_step_index]
-                 self._log_lot_event("goal_tracking", "step_set", {"name": new_step_info.get("name"), "index": goal.current_step_index})
+                new_step_info = goal.steps[goal.current_step_index]
+                self._log_lot_event("goal_tracking", "step_set", {"name": new_step_info.get("name"), "index": goal.current_step_index})
 
 
 
@@ -1731,10 +1893,12 @@ class SimplifiedOrchOREmulator:
         pref_state_log_msg = ""
         action_taken_this_adaptation = False
 
+        # --- CORRECTED TO USE LAST ARBITRATED GOAL ---
+        active_goal = self.last_arbitrated_goal
         active_goal_target_state_for_alignment = None
         goal_step_name_for_alignment_log = "N/A"
-        if self.current_goal_state_obj and self.current_goal_state_obj.status == "active":
-            active_goal = self.current_goal_state_obj
+        
+        if active_goal and active_goal.status == "active":
             if 0 <= active_goal.current_step_index < len(active_goal.steps):
                 current_active_step_for_align = active_goal.steps[active_goal.current_step_index]
                 active_goal_target_state_for_alignment = current_active_step_for_align.get("target_state")
@@ -1757,8 +1921,7 @@ class SimplifiedOrchOREmulator:
 
         is_pref_state_goal_dictated = False
         goal_driven_pref_state_source = "None"
-        if self.current_goal_state_obj and self.current_goal_state_obj.status == "active":
-            active_goal = self.current_goal_state_obj
+        if active_goal and active_goal.status == "active":
             if 0 <= active_goal.current_step_index < len(active_goal.steps):
                 current_active_step = active_goal.steps[active_goal.current_step_index]
                 step_target_state = current_active_step.get("target_state")
@@ -1778,7 +1941,7 @@ class SimplifiedOrchOREmulator:
         if is_pref_state_goal_dictated:
             pref_state_log_msg += f"Preferred state {current_pref_state} currently aligned with active {goal_driven_pref_state_source}. Adaptation highly constrained. "
             if mod_valence <= low_val_thresh * 0.8 and current_pref_state == collapsed_outcome_handle :
-                if self.current_goal_state_obj.status != "active": 
+                if active_goal.status != "active": 
                     self.internal_state_parameters['preferred_state_handle'] = None
                     self.internal_state_parameters['goal_seeking_bias'] = max(0.01, self.internal_state_parameters['goal_seeking_bias'] - 0.3) 
                     pref_state_log_msg += f"Goal no longer active AND low valence for {collapsed_outcome_handle} ({mod_valence:.2f}), cleared preferred state."
@@ -2216,7 +2379,7 @@ class SimplifiedOrchOREmulator:
             for c in history_slice:
                 # The 'focus' key was added to the history dict in the new embodied run_cycle
                 focus = c.get('focus')
-                if focus == 'PHYSICAL':
+                if focus and 'GOAL' in focus:
                     # A physical behavior pattern is (perception, action)
                     pattern = (c.get('perceived_state_handle'), c.get('action_taken'))
                     behavior_patterns.append(pattern)
@@ -2238,7 +2401,7 @@ class SimplifiedOrchOREmulator:
                         loop_valences = []
                         # Correctly find the valences only for cycles that match the found pattern
                         for i, p_tuple in enumerate(behavior_patterns):
-                            if p_tuple == pattern_tuple:
+                             if p_tuple == pattern_tuple and 'valence_mod_this_cycle' in history_slice[i]:
                                 loop_valences.append(history_slice[i]['valence_mod_this_cycle'])
                         
                         if loop_valences and np.mean(loop_valences) < self.firewall_params['low_valence_threshold'] * 0.75:
@@ -2270,7 +2433,7 @@ class SimplifiedOrchOREmulator:
             abstract_cycle_data = [c for c in list(self.cycle_history)[-prem_collapse_streak:] if c.get('focus') == 'ABSTRACT' and 'orp_at_collapse' in c]
             
             if len(abstract_cycle_data) >= prem_collapse_streak: # Ensure we have enough data points
-                threshold_ratios = [c['orp_at_collapse'] / (c['E_OR_thresh_this_cycle']+1e-6) for c in abstract_cycle_data if c.get('num_ops_executed',0) > 0]
+                threshold_ratios = [c['orp_at_collapse'] / (c.get('E_OR_thresh_this_cycle', self.E_OR_THRESHOLD)+1e-6) for c in abstract_cycle_data if c.get('num_ops_executed',0) > 0]
                 if threshold_ratios and all(ratio < self.firewall_params['premature_collapse_orp_max_ratio'] for ratio in threshold_ratios):
                      intervention_reason = f"Persistent Premature ORP Collapse (avg ratio {np.mean(threshold_ratios):.2f} < {self.firewall_params['premature_collapse_orp_max_ratio']} for {len(threshold_ratios)} abstract op-cycles)"
                      self.E_OR_THRESHOLD *= self.firewall_params['intervention_orp_threshold_increase_factor']
@@ -2299,10 +2462,12 @@ class SimplifiedOrchOREmulator:
                 if self.verbose >=1: print(f"[{self.agent_id}] FIREWALL: Attention boosted by {attention_boost_after_firewall_wm_clear:.2f} to {self.internal_state_parameters['attention_level']:.2f} after WM clear.")
                 self._log_lot_event("firewall", "intervention_attention_boost", {"old_attn": old_attn, "boost": attention_boost_after_firewall_wm_clear, "new_attn": self.internal_state_parameters['attention_level']})
 
-            if self.current_goal_state_obj and self.current_goal_state_obj.status == "active":
-                if self.verbose >= 1: print(f"[{self.agent_id}] FIREWALL: Current goal '{self.current_goal_state_obj.current_goal}' status changed to 'pending' due to intervention.")
-                self.current_goal_state_obj.status = "pending" # Interrupt the goal, force re-evaluation
-                self.current_goal_state_obj.history.append({"cycle": self.current_cycle_num, "event": "firewall_interrupted_goal", "reason": intervention_reason[:50]})
+            # --- CORRECTED TO USE LAST ARBITRATED GOAL ---
+            active_goal = self.last_arbitrated_goal
+            if active_goal and active_goal.status == "active":
+                if self.verbose >= 1: print(f"[{self.agent_id}] FIREWALL: Active goal '{active_goal.current_goal}' status changed to 'pending' due to intervention.")
+                active_goal.status = "pending" # Interrupt the goal, force re-evaluation
+                active_goal.history.append({"cycle": self.current_cycle_num, "event": "firewall_interrupted_goal", "reason": intervention_reason[:50]})
 
 
     def _interactive_psych_probe(self):
@@ -2332,6 +2497,7 @@ class SimplifiedOrchOREmulator:
                     print("  summary / s    : Print full internal state summary.")
                     print("  ltm [N]        : Show top N most confident LTM entries (default 5).")
                     print("  wm             : Show contents of working memory stack.")
+                    print("  goals          : List all current goals in the GoalManager.")
                     print("  history [N]    : Show summary of last N cycles (default 3).")
                     print("  get [path]     : Get a parameter value (e.g., get internal_state_parameters.curiosity).")
                     print("  set [path] [v] : Set a parameter value (e.g., set internal_state_parameters.curiosity 0.99).")
@@ -2347,6 +2513,14 @@ class SimplifiedOrchOREmulator:
                         print("--- Working Memory (Top to Bottom) ---")
                         for i, item in enumerate(reversed(self.working_memory.stack)):
                             print(f"  [{i}] {item}")
+                elif cmd == 'goals':
+                    print("--- Current Goals in GoalManager ---")
+                    if not self.goal_manager.goals:
+                        print("  No goals are currently active.")
+                    for i, goal in enumerate(self.goal_manager.goals):
+                        print(f"  [{i}] {goal}")
+                    print(f"Last Arbitrated Goal: {self.last_arbitrated_goal}")
+
                 elif cmd == 'ltm':
                     num_entries = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 5
                     if not self.long_term_memory:
@@ -2361,10 +2535,7 @@ class SimplifiedOrchOREmulator:
                      num_cycles = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 3
                      print(f"--- Last {num_cycles} Cycle Summaries ---")
                      for cycle_data in list(self.cycle_history)[-num_cycles:]:
-                         # Corrected access to StateHandle IDs
-                         input_id = getattr(cycle_data.get('actual_input_state_handle'), 'id', 'N/A')
-                         outcome_id = getattr(cycle_data.get('collapsed_to_handle'), 'id', 'N/A')
-                         print(f"  Cycle {cycle_data['cycle_num']}: Input={input_id}, Outcome={outcome_id}, Val={cycle_data.get('valence_mod_this_cycle', 0):.2f}, Strategy='{cycle_data.get('op_strategy', 'N/A')}'")
+                         print(f"  Cycle {cycle_data['cycle_num']}: Focus='{cycle_data.get('focus', 'N/A')}', Action={cycle_data.get('action_taken', 'None')}, Val={cycle_data.get('valence_mod_this_cycle', 0):.2f}, Surprise={cycle_data.get('surprise_this_cycle', 0):.2f}")
                 elif cmd == 'get':
                     if len(parts) < 2: print("Usage: get path.to.parameter"); continue
                     path_parts = parts[1].split('.')
@@ -2400,13 +2571,26 @@ class SimplifiedOrchOREmulator:
                 elif cmd == 'inject_goal':
                     print("--- Goal Injection ---")
                     g_desc = input("Goal description (e.g., 'Test Goal'): ")
-                    g_target_id = input(f"Target state ID from {list(self.state_handle_by_id.keys())}: ")
-                    if g_target_id not in self.state_handle_by_id:
-                        print("Invalid state ID. Aborting."); continue
-                    target_handle = self.state_handle_by_id[g_target_id]
-                    goal = GoalState(g_desc, [{"name": f"Achieve {target_handle}", "target_state": target_handle}])
-                    self.set_goal_state(goal)
-                    print(f"New goal injected: {self.current_goal_state_obj}")
+                    g_type = input("Goal Type (MAIN_QUEST, OPPORTUNITY, SURVIVAL): ").upper()
+                    if not g_desc or g_type not in ["MAIN_QUEST", "OPPORTUNITY", "SURVIVAL"]:
+                        print("Invalid description or type. Aborting."); continue
+
+                    g_target_concept = input("Target Concept Name (e.g., 'key', 'target', 'charging_pad'): ")
+
+                    # Create a new goal.
+                    # This simple injector creates a single-step goal.
+                    goal = GoalState(
+                        current_goal=g_desc,
+                        goal_type=g_type,
+                        base_priority=0.9, # High priority since it's manual
+                        steps=[{"name": f"Manually achieve {g_target_concept}", "target_concept": g_target_concept}]
+                    )
+                    
+                    if goal.goal_type == "MAIN_QUEST":
+                        self.goal_manager.set_main_goal(goal)
+                    else:
+                        self.goal_manager.add_goal(goal)
+                    print(f"New goal injected: {goal}")
                 else:
                     print(f"Unknown command: '{cmd}'. Type 'help' for a list of commands.")
             except Exception as e:
@@ -2480,23 +2664,38 @@ class SimplifiedOrchOREmulator:
 
 
     def set_goal_state(self, goal_state_obj: Optional[GoalState]):
-        """Sets the agent's active goal."""
-        if not isinstance(goal_state_obj, (GoalState, type(None))):
-            raise ValueError("goal_state_obj must be an instance of GoalState or None.")
+        """
+        Sets the agent's main quest goal via the GoalManager.
+        This will replace any previously existing main quest.
+        """
+        if goal_state_obj is None:
+             # Clear all main quests if passed None
+            self.goal_manager.goals = [g for g in self.goal_manager.goals if g.goal_type != 'MAIN_QUEST']
+            self._log_lot_event("goal", "main_quest_cleared", {})
+            return
 
-        old_goal_name = str(self.current_goal_state_obj.current_goal) if self.current_goal_state_obj else "None"
-        self.current_goal_state_obj = goal_state_obj
+        if not isinstance(goal_state_obj, GoalState):
+            raise ValueError("goal_state_obj must be an instance of GoalState or None.")
         
-        if self.current_goal_state_obj:
-            # Reset progress for the new goal
-            self.current_goal_state_obj.status = "active"
-            self.current_goal_state_obj.progress = 0.0
-            self.current_goal_state_obj.current_step_index = 0
-            if self.verbose >= 1: print(f"[{self.agent_id}] New goal set and activated: {self.current_goal_state_obj}")
-            self._log_lot_event("goal", "set", {"goal_name": str(self.current_goal_state_obj.current_goal)})
-        else:
-            if self.verbose >= 1: print(f"[{self.agent_id}] Goal cleared (was: {old_goal_name}).")
-            self._log_lot_event("goal", "cleared", {"previous_goal_name": old_goal_name})
+        # Ensure it's marked as a main quest.
+        goal_state_obj.goal_type = 'MAIN_QUEST'
+        
+        self.goal_manager.set_main_goal(goal_state_obj)
+        if self.verbose >= 1: print(f"[{self.agent_id}] New main quest set: {goal_state_obj}")
+
+    def is_main_goal_completed(self) -> bool:
+        """
+        Checks if the primary MAIN_QUEST goal is completed.
+        Returns True if a main quest exists and its status is 'completed'.
+        """
+        # Find the main quest in the goal manager's list
+        main_quest = next((g for g in self.goal_manager.goals if g.goal_type == 'MAIN_QUEST'), None)
+        
+        # If a main quest was found and its status is 'completed', return True.
+        if main_quest and main_quest.status == 'completed':
+            return True
+        
+        return False       
 
 
     def print_internal_state_summary(self, indent="  ", custom_logger=None):
@@ -2558,11 +2757,16 @@ class SimplifiedOrchOREmulator:
         if self.firewall_params.get('enabled'):
             log_func(f"{indent}  Firewall Active. CooldownLeft: {self.firewall_cooldown_remaining}, NextCheckIn: {max(0, self.firewall_params['check_interval'] - self.firewall_cycles_since_last_check)}")
 
-        if self.current_goal_state_obj: log_func(f"{indent}  Current Goal: {self.current_goal_state_obj}")
-        else: log_func(f"{indent}  Current Goal: None")
+        log_func(f"{indent}  Goals ({len(self.goal_manager.goals)} active):")
+        for i, goal in enumerate(self.goal_manager.goals):
+            log_func(f"{indent}    [{i}] {goal}")
+        log_func(f"{indent}  Last Arbitrated Focus: {self.last_arbitrated_goal}")
         log_func(f"{indent}--- End of Summary ---")
 
     def get_public_state_summary(self):
+        # Use the arbitrated goal for public state.
+        active_goal = self.last_arbitrated_goal
+        
         return {
             "agent_id": self.agent_id, "current_cycle_num": self.current_cycle_num,
             "mood": self.internal_state_parameters['mood'], "attention": self.internal_state_parameters['attention_level'],
@@ -2570,26 +2774,23 @@ class SimplifiedOrchOREmulator:
             "collapsed_state": self.current_conceptual_state, 
             "preferred_state": self.internal_state_parameters.get('preferred_state_handle'),
             "E_OR_THRESHOLD": self.E_OR_THRESHOLD,
-            "active_goal_name": str(self.current_goal_state_obj.current_goal) if self.current_goal_state_obj else None,
-            "active_goal_progress": self.current_goal_state_obj.progress if self.current_goal_state_obj else None,
-            "active_goal_current_step_name": self.current_goal_state_obj.steps[self.current_goal_state_obj.current_step_index].get("name", f"Step {self.current_goal_state_obj.current_step_index+1}") if self.current_goal_state_obj and self.current_goal_state_obj.steps and 0 <= self.current_goal_state_obj.current_step_index < len(self.current_goal_state_obj.steps) else None,
+            "active_goal_name": str(active_goal.current_goal) if active_goal else None,
+            "active_goal_progress": active_goal.progress if active_goal else None,
+            "active_goal_current_step_name": active_goal.steps[active_goal.current_step_index].get("name", f"Step {active_goal.current_step_index+1}") if active_goal and active_goal.steps and 0 <= active_goal.current_step_index < len(active_goal.steps) else None,
             "working_memory_depth": len(self.working_memory) if self.working_memory else 0,
-            "verbose": self.verbose, 
+            "verbose": self.verbose,  
         }
     
-    def _reasoning_tool_recall_physical_plan(self) -> Optional[List[int]]:
+    def _reasoning_tool_recall_physical_plan(self, active_goal: GoalState) -> Optional[List[int]]:
         """
-        An advanced reasoning tool that recalls a physical plan from LTM,
-        but now includes a GOAL RELEVANCE check to prevent falling for
-        irrelevant, "easy" desires.
+        Recalls a physical plan from LTM, checking for relevance against the
+        currently active, arbitrated goal.
         """
-        if not self.long_term_memory or not self.last_perceived_state or not self.current_goal_state_obj:
+        if not self.long_term_memory or not self.last_perceived_state or not active_goal:
             return None
         
-        # Get the target vector for the CURRENT goal. This is our "willpower" focus.
-        target_latent_vector = self.known_goal_latent_vectors.get(self.current_goal_state_obj.current_goal)
+        target_latent_vector = self.known_goal_latent_vectors.get(active_goal.current_goal)
         if target_latent_vector is None:
-            # If we don't know what the goal is, we can't check for relevance.
             return None
 
         current_latent = self.last_perceived_state.latent_vector
@@ -2604,22 +2805,15 @@ class SimplifiedOrchOREmulator:
                 if plan_confidence > confidence_threshold:
                     distance_from_start = np.linalg.norm(current_latent - data['start_latent_vector'])
                     if distance_from_start < max_dist:
-                        # --- THE NEW "WILLPOWER" / RELEVANCE CHECK ---
-                        # Imagine where this remembered plan will lead.
                         imagined_latent = tf.convert_to_tensor(current_latent, dtype=tf.float32)
                         recalled_plan = list(key[1])
                         for action in recalled_plan:
                             imagined_latent = self.world_model.predict_next_latent_state(imagined_latent, action)
                         
-                        # Compare the imagined outcome to our CURRENT goal.
                         final_imagined_vector = imagined_latent.numpy().flatten()
                         distance_from_goal = np.linalg.norm(final_imagined_vector - target_latent_vector)
                         
-                        # Convert distance to a relevance bonus. Closer is better.
-                        # We give a significant bonus for plans that directly achieve the goal.
                         relevance_bonus = np.clip(1.0 - (distance_from_goal / 10.0), 0, 1.0) * 0.5
-                        
-                        # The final score is a combination of confidence, applicability, and relevance.
                         effective_score = (plan_confidence * 0.7) + (relevance_bonus * 0.3) - (distance_from_start * dist_penalty)
                         
                         candidates.append({
@@ -2631,7 +2825,6 @@ class SimplifiedOrchOREmulator:
         if not candidates:
             return None
 
-        # Choose the best plan based on the new, more intelligent score
         best_plan = max(candidates, key=lambda x: x['score'])
         self._log_lot_event("reasoning_tool", "recall_physical_plan_with_relevance", {
             "plan_len": len(best_plan['plan']), 
@@ -2640,36 +2833,32 @@ class SimplifiedOrchOREmulator:
         })
         return best_plan['plan']
     
-    def _reasoning_tool_physical_shooting_planner(self) -> Optional[List[int]]:
+    def _reasoning_tool_physical_shooting_planner(self, active_goal: GoalState) -> Optional[List[int]]:
         """
-        A reasoning tool that uses mental simulation via the World Model to
-        find a sequence of actions to reach a TARGET CONCEPT defined in the
-        current goal step.
+        A reasoning tool that uses mental simulation to find a sequence of actions
+        to reach the target concept of the active goal's current step.
         """
-        if not self.current_goal_state_obj or not self.last_perceived_state:
+        if not active_goal or not active_goal.steps or not self.last_perceived_state:
             return None
         
-        # --- NEW LOGIC: Determine target from the current goal step ---
         target_latent_vector = None
-        if self.current_goal_state_obj.steps:
-            # Ensure index is valid
-            if 0 <= self.current_goal_state_obj.current_step_index < len(self.current_goal_state_obj.steps):
-                current_step = self.current_goal_state_obj.steps[self.current_goal_state_obj.current_step_index]
-                target_concept_name = current_step.get("target_concept")
+        target_concept_name = "None"
+        
+        if 0 <= active_goal.current_step_index < len(active_goal.steps):
+            current_step = active_goal.steps[active_goal.current_step_index]
+            target_concept_name = current_step.get("target_concept")
 
-                if target_concept_name:
-                    target_latent_vector = self.known_concept_vectors.get(target_concept_name)
-                    self._log_lot_event("reasoning_tool", "shooting_planner_start", {"target_concept": target_concept_name})
-                else: # No target concept in this step, so this planner is not applicable.
-                    return None
-            else: # Invalid step index
-                return None
-        else: # Goal has no steps, planner is not applicable.
-            return None
+            if target_concept_name:
+                target_latent_vector = self.known_concept_vectors.get(target_concept_name)
+                self._log_lot_event("reasoning_tool", "shooting_planner_start", {"goal": active_goal.current_goal, "target_concept": target_concept_name})
+            else:
+                return None # Step has no specific concept target, planner cannot run.
+        else:
+            return None # Invalid step index.
 
         if target_latent_vector is None:
-            self._log_lot_event("reasoning_tool", "shooting_planner_fail", {"reason": "target_concept_not_grounded"})
-            return None # We know the concept name but haven't learned what it looks like yet.
+            self._log_lot_event("reasoning_tool", "shooting_planner_fail", {"reason": "target_concept_not_grounded", "concept_name": target_concept_name})
+            return None
 
         current_latent = self.last_perceived_state.latent_vector
         num_candidates = 32
@@ -2692,16 +2881,15 @@ class SimplifiedOrchOREmulator:
         self._log_lot_event("reasoning_tool", "shooting_planner_end", {"plan_len": len(best_plan or []), "best_dist": best_distance})
         return best_plan
     
-    def _reasoning_decompose_task(self) -> Optional[List[Dict]]:
+    def _reasoning_decompose_task(self, active_goal: GoalState) -> Optional[List[Dict]]:
         """
-        Autonomous task decomposition V3. Creates partial plans even with
-        incomplete knowledge, making exploration more targeted.
+        Autonomous task decomposition, contextualized by the active goal.
         """
-        self._log_lot_event("planner", "task_decomposition_start", {})
-        if not self.current_goal_state_obj or not self.last_perceived_state:
+        self._log_lot_event("planner", "task_decomposition_start", {"goal": active_goal.current_goal})
+        if not active_goal or not self.last_perceived_state:
             return None
 
-        # We can't plan at all if we don't at least know the final destination.
+        # This planner is designed for the 'MAIN_QUEST' with a 'target' concept
         if 'target' not in self.known_concept_vectors:
             self._log_lot_event("planner", "decompose_fail", {"reason": "final_target_concept_unknown"})
             return None
@@ -2719,192 +2907,196 @@ class SimplifiedOrchOREmulator:
         # --- Stage 2: Assemble Plan Based on Known Causal Links and Concepts ---
         final_step = {"name": "Achieve Final Goal", "target_concept": "target"}
         
-        # Case A: We have solved the door problem before.
         if door_preconditions.get('has_key') is True:
             self._log_lot_event("planner", "decompose_insight", {"insight": "'has_key' is precondition for 'door'"})
             
-            # Sub-case A1: We also know what a key is. Full plan is possible.
             if 'key' in self.known_concept_vectors:
                 key_step = {"name": "Acquire Key", "target_concept": "key"}
                 door_step = {"name": "Pass Door", "target_concept": "door"}
                 generated_steps = [key_step, door_step, final_step]
                 
-                if self.verbose >= 1: print(f"[{self.agent_id}] AUTONOMOUS PLAN (Full): Generated own steps: {[s['name'] for s in generated_steps]}")
+                if self.verbose >= 1: print(f"[{self.agent_id}] AUTONOMOUS PLAN (Full): Generated steps for '{active_goal.current_goal}': {[s['name'] for s in generated_steps]}")
                 self._log_lot_event("planner", "decompose_success", {"plan_type": "full", "steps": [s['name'] for s in generated_steps]})
                 return generated_steps
-            # Sub-case A2: We know a key is needed, but don't know what it is. Partial plan.
             else:
-                unknown_key_step = {"name": "Find the Prerequisite for Door", "target_concept": None} # Explore until we find the key
+                unknown_key_step = {"name": "Find Prerequisite for Door", "target_concept": None} 
                 door_step = {"name": "Pass Door", "target_concept": "door"}
                 generated_steps = [unknown_key_step, door_step, final_step]
 
-                if self.verbose >= 1: print(f"[{self.agent_id}] AUTONOMOUS PLAN (Partial): Generated own steps: {[s['name'] for s in generated_steps]}")
+                if self.verbose >= 1: print(f"[{self.agent_id}] AUTONOMOUS PLAN (Partial): Generated steps for '{active_goal.current_goal}': {[s['name'] for s in generated_steps]}")
                 self._log_lot_event("planner", "decompose_success", {"plan_type": "partial_unknown_key", "steps": [s['name'] for s in generated_steps]})
                 return generated_steps
 
-        # Case B: We know what a door is, but haven't solved it yet.
         elif 'door' in self.known_concept_vectors:
-            door_step = {"name": "Solve the Door Obstacle", "target_concept": "door"}
+            door_step = {"name": "Solve Door Obstacle", "target_concept": "door"}
             generated_steps = [door_step, final_step]
-
-            if self.verbose >= 1: print(f"[{self.agent_id}] AUTONOMOUS PLAN (Partial): Generated own steps: {[s['name'] for s in generated_steps]}")
+            if self.verbose >= 1: print(f"[{self.agent_id}] AUTONOMOUS PLAN (Partial): Generated steps for '{active_goal.current_goal}': {[s['name'] for s in generated_steps]}")
             self._log_lot_event("planner", "decompose_success", {"plan_type": "partial_solve_door", "steps": [s['name'] for s in generated_steps]})
             return generated_steps
             
-        # Case C: We only know the target. Simplest possible plan.
         else:
             generated_steps = [final_step]
-            if self.verbose >= 1: print(f"[{self.agent_id}] AUTONOMOUS PLAN (Direct): Generated own steps: {[s['name'] for s in generated_steps]}")
+            if self.verbose >= 1: print(f"[{self.agent_id}] AUTONOMOUS PLAN (Direct): Generated steps for '{active_goal.current_goal}': {[s['name'] for s in generated_steps]}")
             self._log_lot_event("planner", "decompose_success", {"plan_type": "direct_to_target", "steps": [s['name'] for s in generated_steps]})
             return generated_steps
     
-    def _executive_formulate_cognitive_strategy(self) -> Tuple[Optional[str], Optional[List[Any]]]:
+    def _executive_formulate_cognitive_strategy(self, active_goal: Optional[GoalState]) -> Tuple[Optional[str], Optional[List[Any]]]:
         """
-        The AUTONOMOUS unified reasoning engine. Version 4: With frustration-based
-        re-evaluation of self-generated plans.
+        The unified reasoning engine, now driven by an arbitrated active goal.
+        It determines the overall cognitive focus (physical action or abstract thought)
+        and formulates a plan to service the currently most urgent goal.
         """
-        self._log_lot_event("planner", "strategy_formulation_start", {"mood": self.internal_state_parameters['mood']})
-        goal = self.current_goal_state_obj
+        self._log_lot_event("planner", "strategy_formulation_start", {
+            "active_goal": str(active_goal), 
+            "mood": self.internal_state_parameters['mood']
+        })
 
-        # Update the counter for how long we've been on the current step
-        if goal and goal.steps and 0 <= goal.current_step_index < len(goal.steps):
+        if active_goal is None:
+            # No active goals. The agent can "daydream" or reflect.
+            self._log_lot_event("planner", "no_active_goal", {})
+            self._execute_abstract_computation()
+            return 'ABSTRACT', None
+            
+        # Update the counter for how long we've been on the current step *of the active goal*
+        if active_goal and active_goal.steps and 0 <= active_goal.current_step_index < len(active_goal.steps):
             self.cycles_stuck_on_step += 1
         else:
             self.cycles_stuck_on_step = 0
-
-        # --- Part 0: Frustration Override ---
-        # If we are stuck on a step for too long, our plan must be wrong.
-        # Force exploration to find new causal links.
-        if self.cycles_stuck_on_step > 40: # Hyperparameter for "patience"
-            self._log_lot_event("planner", "replan_trigger", {"reason": "stuck_on_step_too_long"})
-            # Invalidate the current plan and reset frustration
-            if goal:
-                goal.steps = []
-                goal.current_step_index = 0
+            
+        # --- Frustration Override ---
+        if self.cycles_stuck_on_step > 40:
+            self._log_lot_event("planner", "replan_trigger", {"reason": "stuck_on_step", "goal": active_goal.current_goal})
+            # Invalidate the current plan FOR THIS GOAL
+            active_goal.steps = []
+            active_goal.current_step_index = 0
             self.cycles_stuck_on_step = 0
-            self.internal_state_parameters['frustration'] = 0.5 # A jolt of frustration to encourage new behavior
+            self.internal_state_parameters['frustration'] = min(0.9, self.internal_state_parameters['frustration'] + 0.5)
 
-        # --- Part 1: AUTONOMOUS TASK DECOMPOSITION ---
-        if goal and not goal.steps:
-            self._log_lot_event("planner", "attempt_decomposition", {"goal": goal.current_goal})
-            new_steps = self._reasoning_decompose_task()
+        # --- Autonomous Task Decomposition ---
+        # If the active goal has no steps, try to break it down.
+        if not active_goal.steps:
+            self._log_lot_event("planner", "attempt_decomposition", {"goal": active_goal.current_goal})
+            # Pass the active goal context to the decomposer
+            new_steps = self._reasoning_decompose_task(active_goal) 
             if new_steps:
-                goal.steps = new_steps
-                self.cycles_stuck_on_step = 0 # Reset counter on new plan
+                active_goal.steps = new_steps
+                self.cycles_stuck_on_step = 0
 
-        # --- Part 2: INTELLIGENT EXPLORATION & ACTION BIAS ---
-        is_physical_goal_oriented_task = goal and goal.evaluation_criteria == "GOAL_COMPLETION"
-        if is_physical_goal_oriented_task:
-            # If decomposition failed or was invalidated, we must explore.
-            if not goal.steps:
-                self._log_lot_event("planner", "action_bias_explore", {"reason": "decomposition_failed_or_invalidated"})
+        # --- Physical Action Planning ---
+        # The agent should act physically if its goal requires interacting with the world.
+        is_physical_task = active_goal.evaluation_criteria == "GOAL_COMPLETION" or active_goal.goal_type in ["SURVIVAL", "OPPORTUNITY"]
+        
+        if is_physical_task:
+            if not active_goal.steps:
+                self._log_lot_event("planner", "explore_physical", {"reason": "decomposition_failed", "goal": active_goal.current_goal})
                 return 'PHYSICAL', [self.action_space.sample() for _ in range(5)]
-                
-            # Try to execute the current step of our (possibly self-generated) plan
-            plan = self._reasoning_tool_physical_shooting_planner()
+
+            # Try to generate a plan for the current step of the active goal.
+            plan = self._reasoning_tool_physical_shooting_planner(active_goal)
             if plan:
+                self._log_lot_event("planner", "physical_plan_found", {"goal": active_goal.current_goal, "step": active_goal.current_step_index})
                 return 'PHYSICAL', plan
 
-            # If the planner fails for the current step (e.g., concept not learned yet), explore.
-            self._log_lot_event("planner", "action_bias_explore", {"reason": f"shooting_planner_failed_for_step_{goal.current_step_index}"})
+            # If the planner fails (e.g., target concept unknown), explore.
+            self._log_lot_event("planner", "explore_physical", {"reason": "planning_failed_for_step", "goal": active_goal.current_goal})
             return 'PHYSICAL', [self.action_space.sample() for _ in range(5)]
-        
-        # --- Part 3: Fallback for Non-Physical or Creative Goals ---
-        is_creative_task = goal and (goal.reasoning_heuristic == "CREATIVE_GENERATION" or goal.evaluation_criteria == "NOVELTY")
+            
+        # --- Abstract Thought Planning ---
+        # For goals explicitly about creativity or if no physical action is warranted.
+        is_creative_task = active_goal.reasoning_heuristic == "CREATIVE_GENERATION" or active_goal.evaluation_criteria == "NOVELTY"
         if is_creative_task:
-            self._log_lot_event("planner", "creative_mode_engaged", {})
+            self._log_lot_event("planner", "creative_mode_engaged", {"goal": active_goal.current_goal})
             self._execute_abstract_computation()
             return 'ABSTRACT', None
-        
-        # --- Part 4: Ultimate Fallback (Should be rare) ---
-        # If the goal type is somehow undefined or no other logic applies, default to a safe "thinking" action.
+            
+        # --- Ultimate Fallback ---
         self._log_lot_event("planner", "strategy_fallback", {"reason": "unhandled_goal_type", "action": "abstract_thought"})
         self._execute_abstract_computation()
         return 'ABSTRACT', None
     
 
-    def run_cycle(self, raw_image_observation: np.ndarray, last_reward: float, last_info: Dict, is_terminated: bool) -> Optional[int]:
+    def run_cycle(self, raw_image_observation: np.ndarray, last_reward: float, last_info: Dict, is_terminated: bool, current_full_obs: Dict) -> Optional[int]:
         """
-        The primary cognitive-motor cycle. This version has a corrected,
-        unambiguous signature for processing events. It processes the
-        consequences of the last action, perceives the new state of the world,
-        and then decides on the next action.
+        The primary cognitive-motor cycle. Processes environmental feedback,
+        arbitrates between competing goals, formulates a strategy for the
+        most urgent goal, and decides on the next action or thought.
         """
-        # --- PRE-CYCLE: Retrieve previous action for logging/learning ---
         last_action = self.cycle_history[-1]['action_taken'] if self.cycle_history and 'action_taken' in self.cycle_history[-1] else None
-
-        # --- Sanity check on the very first cycle ---
-        if self.current_cycle_num == 0:
-            print("--- Performing one-time VAE sanity check ---")
-            try:
-                img_tensor = tf.convert_to_tensor(raw_image_observation, dtype=tf.float32)
-                img_tensor = tf.image.resize(img_tensor, self.vae_params['IMG_SIZE']) / 255.0
-                if len(img_tensor.shape) == 3: img_tensor = tf.expand_dims(img_tensor, 0)
-                z_mean, _, _ = self.visual_cortex.encoder(img_tensor)
-                latent_vector_sum = tf.reduce_sum(z_mean).numpy()
-                if abs(latent_vector_sum) > 1e-6:
-                    print(f"[SUCCESS] VAE is active. Latent vector checksum: {latent_vector_sum:.4f}")
-                else:
-                    print("[!! WARNING !!] VAE is likely NOT working. Latent vector is all zeros.")
-            except Exception as e:
-                print(f"[!!! CRITICAL FAILURE !!!] Error during VAE sanity check: {e}")
-            print("------------------------------------------")
 
         # --- CYCLE START ---
         self.current_cycle_num += 1
         start_time = time.time()
         self.current_cycle_lot_stream = []
         self._log_lot_event("system", "cycle_start", {"cycle": self.current_cycle_num, "reward_in": last_reward})
-
-        # --- 1. PROCESS CONSEQUENCES & PERCEIVE THE PRESENT ---
-        # First, process the feedback from the *last* action taken.
+        
+        # --- 1. PROCESS WORLD STATE & PERCEIVE ---
+        # A) Process consequences from the LAST action.
         self._process_environmental_feedback(last_reward, is_terminated, last_info)
-        # THEN, perceive the *current* state of the world resulting from that action.
+        # B) Update internal model with CURRENT non-visual state (energy, etc.).
+        self._update_internal_world_model(current_full_obs)
+        # C) Perceive the CURRENT visual scene.
         prediction_error = self._ingest_sensory_data(raw_image_observation)
-
-        # Store the experience connecting the *previous* state and action to the *current* state
+        
+        # --- 2. LEARNING & MEMORY ---
+        # Store experience connecting previous state/action to the current perception.
         if last_action is not None and hasattr(self, '_last_raw_image_obs'):
-            experience = {
-                'state_img': self._last_raw_image_obs,
-                'action': last_action,
-                'next_state_img': raw_image_observation
-            }
+            experience = {'state_img': self._last_raw_image_obs, 'action': last_action, 'next_state_img': raw_image_observation}
             if self.experience_replay_buffer.add(experience, self.last_cycle_valence_mod, prediction_error):
                 self._log_lot_event("learning", "replay_buffer_add", {"valence": self.last_cycle_valence_mod, "surprise": prediction_error})
-        # Cache the current raw image for the *next* cycle's experience buffer
         self._last_raw_image_obs = raw_image_observation
 
-        # --- 2. COGNITIVE & METACOGNITIVE UPDATES ---
-        if self.current_goal_state_obj: self._executive_update_goal_progress(self.last_perceived_state)
+        # --- 3. GOAL ARBITRATION & COGNITIVE HOUSEKEEPING ---
+        # Update goal progress based on the outcome of the LAST cycle's action.
+        if self.last_arbitrated_goal:
+             self._executive_update_goal_progress(self.last_arbitrated_goal, self.last_perceived_state)
+        # Run cognitive firewall
         self._firewall_detect_and_correct_anomalies()
+        
+        # A) Update the list of goals based on the new world state (e.g., spawn bonus goal).
+        # B) Arbitrate to find the most urgent goal for THIS cycle.
+        arbitrated_goal = self.goal_manager.update_and_arbitrate()
+        self.last_arbitrated_goal = arbitrated_goal # Store for next cycle's evaluation.
 
-        # --- 3. FORMULATE STRATEGY & DECIDE ON ACTION ---
+        # --- 4. STRATEGY FORMULATION & ACTION ---
         action_to_take = None
-        plan_type, new_plan = self._executive_formulate_cognitive_strategy()
+        # Formulate a plan specifically for the arbitrated goal.
+        plan_type, new_plan = self._executive_formulate_cognitive_strategy(arbitrated_goal)
 
         if plan_type == 'PHYSICAL' and new_plan:
             self.current_action_plan = collections.deque(new_plan)
             action_to_take = self.current_action_plan.popleft()
         elif plan_type == 'ABSTRACT':
-            action_to_take = None # The agent chose to "think".
+            action_to_take = None # Agent chose to think.
 
-        # If a plan is being executed, continue it
+        # If a plan was already in motion, continue it, UNLESS the arbitrated goal is different
+        # and has very high urgency (e.g., survival).
         elif self.current_action_plan:
-             action_to_take = self.current_action_plan.popleft()
+             # Basic interrupt logic: if survival is critical, drop everything.
+            if arbitrated_goal and arbitrated_goal.goal_type == 'SURVIVAL':
+                 urgency_for_interrupt = self.goal_manager._calculate_urgency(arbitrated_goal)
+                 if urgency_for_interrupt > 3.0: # High urgency threshold
+                    self._log_lot_event("planner", "interrupt", {"reason": "survival_urgent", "old_plan_len": len(self.current_action_plan)})
+                    self.current_action_plan.clear() # Ditch the old plan
+                 else:
+                    action_to_take = self.current_action_plan.popleft()
+            else:
+                 action_to_take = self.current_action_plan.popleft()
 
-        # --- 4. IMAGINE NEXT STATE & CYCLE WRAP-UP ---
+
+        # --- 5. IMAGINATION & CYCLE WRAP-UP ---
         if action_to_take is not None:
             imagined_next_state_tensor = self.world_model.predict_next_latent_state(
                 current_latent=tf.convert_to_tensor(self.last_perceived_state.latent_vector, dtype=tf.float32),
-                action=action_to_take
-            )
+                action=action_to_take)
             self.last_imagined_next_state = imagined_next_state_tensor.numpy().flatten()
         else:
             self.last_imagined_next_state = self.last_perceived_state.latent_vector
 
-        focus = plan_type if plan_type else ("PHYSICAL_EXEC" if self.current_action_plan else "UNFOCUSED")
+        # Log cycle data for history and metacognition
+        focus = f"GOAL:{arbitrated_goal.goal_type}" if arbitrated_goal else "IDLE"
         cycle_data = {
             'cycle_num': self.current_cycle_num, 'focus': focus, 'action_taken': action_to_take,
+            'arbitrated_goal': str(arbitrated_goal),
             'perceived_state_handle': self.last_perceived_state,
             'reward_received': last_reward, 'valence_mod_this_cycle': self.last_cycle_valence_mod,
             'mood_after_cycle': self.internal_state_parameters['mood'],
@@ -2913,6 +3105,12 @@ class SimplifiedOrchOREmulator:
         self.cycle_history.append(cycle_data)
         
         self._log_lot_event("system", "cycle_end", {"duration_ms": (time.time() - start_time) * 1000, "action": action_to_take})
+        
+        # This will now print the active goals at the end of some cycles
+        if self.verbose >= 1 and self.current_cycle_num % 10 == 0:
+            print(f"[{self.agent_id} C{self.current_cycle_num}] Goals: {[str(g) for g in self.goal_manager.goals]}")
+            print(f"[{self.agent_id} C{self.current_cycle_num}] Active Focus: {arbitrated_goal}")
+
         return action_to_take
 
 
