@@ -154,6 +154,8 @@ class WorkingMemoryStack:
 # ---------------------------------------------------------------------------
 # GoalState Structure
 # ---------------------------------------------------------------------------
+# core_abstractions.py
+
 class GoalState:
     """
     Represents a structured goal, potentially with multiple steps, sub-goals,
@@ -161,7 +163,11 @@ class GoalState:
     the agent's goal-directed behavior. It also acts as a "cognitive primer"
     to influence the agent's reasoning process without explicit commands.
     """
-    def __init__(self, current_goal: Any, steps: List[Dict], error_tolerance: float = 0.05,
+    def __init__(self, current_goal: Any, 
+                 steps: List[Dict],
+                 goal_type: str = "MAIN_QUEST", # NEW: 'SURVIVAL', 'OPPORTUNITY'
+                 base_priority: float = 0.5, # NEW: Default priority score
+                 error_tolerance: float = 0.05,
                  initial_progress: float = 0.0,
                  # --- New "Cognitive Primer" properties ---
                  focus_concepts: List[StateHandle] = None,
@@ -176,7 +182,9 @@ class GoalState:
         self.status = "pending"  # pending, active, completed, failed
         self.history = []
         
-        # New properties to prime the cognitive process
+        # New properties for arbitration and cognitive priming
+        self.goal_type = goal_type
+        self.base_priority = base_priority
         self.focus_concepts = focus_concepts if focus_concepts is not None else []
         self.reasoning_heuristic = reasoning_heuristic
         self.evaluation_criteria = evaluation_criteria
@@ -207,6 +215,8 @@ class GoalState:
             "current_step_index": self.current_step_index,
             "status": self.status,
             "history": self.history,
+            "goal_type": self.goal_type,
+            "base_priority": self.base_priority,
             "focus_concepts": [str(c) for c in self.focus_concepts],
             "reasoning_heuristic": self.reasoning_heuristic,
             "evaluation_criteria": self.evaluation_criteria,
@@ -242,5 +252,5 @@ class GoalState:
         if self.evaluation_criteria: primer_str.append(f"Eval:{self.evaluation_criteria}")
         primer_info = f" Primer[{', '.join(primer_str)}]" if primer_str else ""
 
-        return (f"Goal: '{goal_desc_str}' (Step: '{final_step_display}', "
-                f"Progress: {self.progress * 100:.1f}%, Status: {self.status}){primer_info}")
+        return (f"Goal({self.goal_type}): '{goal_desc_str}' (Step: '{final_step_display}', "
+                f"Prio: {self.base_priority:.2f}, Status: {self.status}){primer_info}")
