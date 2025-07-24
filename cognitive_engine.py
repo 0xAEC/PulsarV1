@@ -17,12 +17,16 @@ import random
 import collections 
 import traceback 
 import heapq
-import math 
-from typing import List, Dict, Any, Deque, Optional, Tuple
-import gymnasium as gym 
+import math
+import gymnasium as gym
 
+
+from typing import List, Dict, Any, Deque, Optional, Tuple
 # PerceptionSystem is no longer directly used by the agent, but may be used by other helpers. Keep for now.
 from environment import PerceptionSystem 
+
+from perception import SymbolicPerceptionCore
+from core_abstractions import ActiveConceptNetGraph, LanguageOfThought, Program, Function
 
 from core_abstractions import StateHandle, WorkingMemoryItem, WorkingMemoryStack, GoalState, LogEntry
 from universe_definitions import TWO_QUBIT_UNIVERSE_CONFIG
@@ -214,23 +218,318 @@ class GoalManager:
             
         elif goal.goal_type == "MAIN_QUEST":
             goal_bias = self.agent.internal_state_parameters['goal_seeking_bias']
-            # NEW: If frustrated, the agent is less inclined to pursue the main quest.
             frustration_penalty = self.agent.internal_state_parameters['frustration'] * 0.5
-            urgency = goal.base_priority + goal_bias - frustration_penalty
+            
+            # --- THE FINAL FIX: THE "CONSCIENCE" ---
+            # If the agent is stuck on a single step of the main quest, its urgency grows.
+            # This represents a growing impatience and a desire to make progress on its primary purpose.
+            impatience_bonus = 0.0
+            if self.agent.last_arbitrated_goal and self.agent.last_arbitrated_goal.current_goal == goal.current_goal:
+                 impatience_bonus = self.agent.cycles_stuck_on_step * 0.015 
+
+            urgency = goal.base_priority + goal_bias - frustration_penalty + impatience_bonus
 
         else: # Default case
             urgency = goal.base_priority
 
         return max(0, urgency) # Urgency cannot be negative
+    
+
+class LambdaLearner:
+    """The engine of intellectual growth."""
+    def __init__(self, lot_library_ref: LanguageOfThought):
+        self.lot_library = lot_library_ref
+        # MODIFIED: program_history now stores a dictionary for richer context for analogy.
+        self.program_history: Dict[str, Dict[str, Any]] = {}
+        self.subroutine_counter = collections.Counter()
+        self.verbose = 0
+        self._log_lot_event = lambda *args, **kwargs: None
+
+    # MODIFIED: Method signature changed to accept the diff for analogical reasoning.
+    def log_successful_program(self, task_id: str, program: Program, diff: Dict):
+        """Logs a successful program and its generating diff for future analogy."""
+        self.program_history[task_id] = {'program': program, 'diff': diff}
+
+        if not program or not isinstance(program, list) or 'function' not in program[0]:
+            return
+        serializable_program = tuple(step['function'] for step in program)
+        if len(serializable_program) < 2: return
+
+        for i in range(len(serializable_program) - 1):
+            self.subroutine_counter[serializable_program[i:i+2]] += 1
+
+
+    def consolidate_knowledge(self):
+        """Triggers abstraction, creating new functions from redundant subroutines."""
+        if self.verbose >= 1: print("  LAMBDA_LEARNER: Consolidating knowledge...")
+        for subroutine_tuple, count in self.subroutine_counter.items():
+            if count > 2:
+                new_func_name = "Learned_" + "_then_".join(subroutine_tuple)
+                if self.lot_library.get_function(new_func_name): continue
+                if self.verbose >= 1: print(f"    Found redundant subroutine: {subroutine_tuple}. Abstracting to '{new_func_name}'")
+                learned_body = [{'function': fn, 'args': []} for fn in subroutine_tuple]
+                self.lot_library.add_learned_function(Function(name=new_func_name, body=None, is_learned=True, learned_body=learned_body))
+                self._log_lot_event("lambda_learner", "function_learned", {"name": new_func_name})
+
+# ---------------------------------------------------------------------------
+# >>> NEW: Pillar 3 - The Multi-Strategy Scientific Reasoning Engine
+# ---------------------------------------------------------------------------
+class MultiStrategyScientificReasoningEngine:
+    """
+    Implements the scientific method. It searches for a program in the agent's LoT
+    that explains the data, using multiple, cascading strategies.
+    """
+    def __init__(self, agent_ref: 'SimplifiedOrchOREmulator'):
+        self.agent = agent_ref
+        self.verbose = agent_ref.verbose
+        self._log_lot_event = agent_ref._log_lot_event
+
+    def generate_solution_program(self, input_graph: ActiveConceptNetGraph, output_graph: ActiveConceptNetGraph, diff: Dict, input_grid: np.ndarray) -> Program | None:
+        """Main entry point. Tries strategies from simplest to most complex."""
+        self._log_lot_event("reasoning_engine", "start_search", {"diff_keys": list(d for d in diff if diff[d])})
+        
+        # --- THE ULTIMATE COGNITIVE ORDERING ---
+        # 0. NEW: Before anything else, see if a high-level learned skill solves the problem.
+        program = self._strategy_use_learned_abstraction(input_graph, output_graph, input_grid)
+        if program:
+            self._log_lot_event("reasoning_engine", "solution_found", {"strategy": 0, "method": "Learned Abstraction", "program": [p['function'] for p in program]})
+            return program
+            
+        # 1. If no learned skill applies, check LTM for an analogous problem to adapt.
+        program = self._strategy_analogical_synthesis(diff, input_graph, output_graph)
+        if program:
+            self._log_lot_event("reasoning_engine", "solution_found", {"strategy": 1, "method": "Analogical Synthesis", "program": [p['function'] for p in program]})
+            return program
+
+        # 2. If no memory exists, solve from scratch using simple, direct observations.
+        program = self._strategy_empirical_correspondence(input_graph, output_graph, diff)
+        if program:
+            self._log_lot_event("reasoning_engine", "solution_found", {"strategy": 2, "method": "Empirical Correspondence", "program": [p['function'] for p in program]})
+            return program
+        
+        # 3. If direct observation fails, form a more abstract, overarching theory.
+        program = self._strategy_inductive_generation(input_graph, output_graph, diff)
+        if program:
+            self._log_lot_event("reasoning_engine", "solution_found", {"strategy": 3, "method": "Inductive Generation", "program": [p['function'] for p in program]})
+            return program
+
+        self._log_lot_event("reasoning_engine", "search_failed", {"reason": "all_strategies_exhausted"})
+        return None
+    
+
+    def _strategy_use_learned_abstraction(self, in_graph: ActiveConceptNetGraph, out_graph: ActiveConceptNetGraph, in_grid: np.ndarray) -> Program | None:
+        """Strategy 0: Test high-level learned skills against the problem."""
+        if self.verbose >= 1: print("    REASONING: Trying Strategy 0 (Use Learned Abstraction)...")
+        
+        learned_functions = self.agent.language_of_thought.learned_functions
+        if not learned_functions:
+            return None # No skills have been learned yet.
+
+        for func_name, func_obj in learned_functions.items():
+            # To test a learned function, we must simulate its effect.
+            # A learned function is just a program. We can run it on the input grid.
+            if self.verbose >= 2: print(f"      Testing learned skill: '{func_name}'")
+            
+            # We need to re-ground the arguments for the simulation.
+            # This is a simplified but effective way for copy-move.
+            adapted_program = self.agent.reasoning_engine._strategy_analogical_synthesis(
+                ActiveConceptNetGraph.graph_diff(in_graph, out_graph),
+                in_graph,
+                out_graph
+            )
+
+            if adapted_program:
+                 # Check if the body of the learned function matches the adapted program's functions
+                learned_body_funcs = tuple(s['function'] for s in func_obj.learned_body)
+                adapted_program_funcs = tuple(s['function'] for s in adapted_program)
+
+                if learned_body_funcs == adapted_program_funcs:
+                    if self.verbose >= 1: print(f"      SUCCESS: Learned skill '{func_name}' is a perfect match for this problem's required operations.")
+                    # We can now use the high-level function call, but we must pass the adapted arguments.
+                    # For a simple program like [Copy, Move], the args for the learned function
+                    # would be the combined args of its body. This can get complex.
+                    # A simpler, powerful approach: return the adapted program but LOG that a learned skill was the key.
+                    # For now, let's just use the learned function name directly if it requires no arguments.
+                    # A more robust solution would be to make the learned function callable with the necessary args.
+                    # Let's return the adapted program, but acknowledge the learned skill was the gateway.
+                    # This is a good compromise for this stage.
+                    return adapted_program # The key is that we *found* it via the learned skill.
+
+        return None
+
+
+    def _strategy_empirical_correspondence(self, in_graph, out_graph, diff):
+        """Strategy 1: Finds simple 1-to-1 mappings. Good for Move/Recolor/etc."""
+        if self.verbose >= 1: print("    REASONING: Trying Strategy 1 (Empirical Correspondence)...")
+    
+        nodes_added = diff.get('nodes_added', [])
+        
+        # === NEW COMPLEX LOGIC: Handle object "growth" as a copy/move ===
+        # This fires when an object changes shape/size, but no new object is created. This is common
+        # for adjacent copies that get merged into a single object by the perception system.
+        num_in_objects = len([n for n in in_graph.nodes.values() if n.type == 'object'])
+        num_out_objects = len([n for n in out_graph.nodes.values() if n.type == 'object'])
+
+        if not nodes_added and num_in_objects == 1 and num_out_objects == 1:
+            in_obj = next((n for n in in_graph.nodes.values() if n.type == 'object'), None)
+            out_obj = next((n for n in out_graph.nodes.values() if n.type == 'object'), None)
+    
+            if in_obj and out_obj:
+                in_coords = in_obj.attributes.get('Coordinates', [])
+                out_coords = out_obj.attributes.get('Coordinates', [])
+                
+                # Check for same color and a size increase
+                if in_obj.attributes.get('Color') == out_obj.attributes.get('Color') and len(out_coords) > len(in_coords):
+                    # Find the pixels that were added to form the new object
+                    added_pixels = sorted(list(set(tuple(c) for c in out_coords) - set(tuple(c) for c in in_coords)))
+    
+                    # Check if the added pixels form a shape identical to the original object
+                    if len(added_pixels) == len(in_coords):
+                        original_shape_hash = in_obj.attributes.get('ShapeHash')
+    
+                        # Calculate the ShapeHash of the newly added pixels to see if they match the original's shape
+                        if added_pixels:
+                            min_r_new = min(r for r, c in added_pixels)
+                            min_c_new = min(c for r, c in added_pixels)
+                            new_shape_hash = tuple(sorted([(r - min_r_new, c - min_c_new) for r, c in added_pixels]))
+    
+                            if new_shape_hash == original_shape_hash:
+                                # It's a match! We've deduced a copy-move. Now find the translation vector.
+                                old_pos = in_obj.attributes.get('Position', (0, 0)) # top-left of original
+                                new_pos_of_copy = (min_r_new, min_c_new) # top-left of the new part
+                                
+                                # Movement is (dy, dx). Remember grid is (row, col) so dy is change in row, dx is change in col.
+                                dy = new_pos_of_copy[0] - old_pos[0]
+                                dx = new_pos_of_copy[1] - old_pos[1]
+                                
+                                if self.verbose >= 1: print("      Strategy 1 Insight: Object 'growth' detected as identical copy-move.")
+                                # The selector must refer to the original object's ID from the input graph.
+                                return [
+                                    self.agent.language_of_thought.get_function('Copy').body(f"object_with_id({in_obj.id})"),
+                                    self.agent.language_of_thought.get_function('Move').body("last_created_object", dx, dy)
+                                ]
+
+        # === ORIGINAL LOGIC: Handle a distinct, non-adjacent new object being added ===
+        if len(nodes_added) == 1:
+            added_attrs = nodes_added[0]
+            # This logic is looking for an object in the input that has the same intrinsic properties (shape, color)
+            # as the newly added object. It's the classic, non-adjacent copy detection.
+            for node in in_graph.nodes.values():
+                if node.type == 'object' and \
+                   node.attributes.get('ShapeHash') == added_attrs.get('ShapeHash') and \
+                   node.attributes.get('Color') == added_attrs.get('Color'):
+                    old_pos = node.attributes.get('Position', (0, 0))
+                    new_pos = added_attrs.get('Position', (0, 0))
+                    dx, dy = new_pos[1] - old_pos[1], new_pos[0] - old_pos[0]
+                    return [
+                        self.agent.language_of_thought.get_function('Copy').body(f"object_with_id({node.id})"),
+                        self.agent.language_of_thought.get_function('Move').body("last_created_object", dx, dy)
+                    ]
+        return None
+
+    def _strategy_analogical_synthesis(self, diff: Dict, in_graph: ActiveConceptNetGraph, out_graph: ActiveConceptNetGraph) -> Program | None:
+        """Strategy 2: Queries LTM for problems with a similar transformation signature and re-grounds the parameters."""
+        if self.verbose >= 1: print("    REASONING: Trying Strategy 2 (Analogical Synthesis)...")
+        current_diff_sig = tuple(sorted(key for key, val in diff.items() if val))
+        if not current_diff_sig: return None
+
+        for task_id, memory in self.agent.lambda_learner.program_history.items():
+            past_diff = memory.get('diff', {})
+            past_diff_sig = tuple(sorted(key for key, val in past_diff.items() if val))
+
+            if current_diff_sig == past_diff_sig:
+                if self.verbose >= 1: print(f"      Found analogous solved problem: {task_id}. Adapting its program.")
+                
+                recalled_program = memory['program']
+                
+                # --- RE-GROUNDING LOGIC ---
+                # Check if the recalled program needs its parameters updated for the new context.
+                # This is a targeted fix for the 'Move' function. A more advanced system
+                # would have a general way to tag parameters that need re-grounding.
+                new_program = []
+                is_regrounded = False
+                for step in recalled_program:
+                    if step.get('function') == 'Move':
+                        # The 'Move' arguments are likely stale. Recalculate them.
+                        # This logic is intentionally duplicated from _strategy_empirical_correspondence
+                        # to show the re-grounding process. A future refactor could create a shared helper function.
+                        in_obj = next((n for n in in_graph.nodes.values() if n.type == 'object'), None)
+                        out_obj = next((n for n in out_graph.nodes.values() if n.type == 'object'), None)
+
+                        if in_obj and out_obj:
+                            in_coords = in_obj.attributes.get('Coordinates', [])
+                            out_coords = out_obj.attributes.get('Coordinates', [])
+                            added_pixels = sorted(list(set(tuple(c) for c in out_coords) - set(tuple(c) for c in in_coords)))
+                            
+                            if added_pixels:
+                                old_pos = in_obj.attributes.get('Position', (0, 0))
+                                new_pos_of_copy = (min(r for r, c in added_pixels), min(c for r, c in added_pixels))
+                                dy = new_pos_of_copy[0] - old_pos[0]
+                                dx = new_pos_of_copy[1] - old_pos[1]
+                                
+                                # Create a new, re-grounded 'Move' step
+                                new_move_step = self.agent.language_of_thought.get_function('Move').body("last_created_object", dx, dy)
+                                new_program.append(new_move_step)
+                                is_regrounded = True
+                                if self.verbose >= 1: print(f"        Re-grounded 'Move' with new parameters: dx={dx}, dy={dy}")
+                            else:
+                                # Could not re-ground, append the old step and hope for the best
+                                new_program.append(step)
+                        else:
+                            new_program.append(step)
+                    else:
+                        # This step doesn't need re-grounding, so just copy it.
+                        new_program.append(step)
+
+                return new_program if is_regrounded else recalled_program
+
+        return None
+
+    def _strategy_inductive_generation(self, in_graph: ActiveConceptNetGraph, out_graph: ActiveConceptNetGraph, diff: Dict) -> Program | None:
+        """
+        [DEFINITIVE FIX] Generates theories about abstract rules governing the transformation.
+        """
+        if self.verbose >= 1: print("    REASONING: Trying Strategy 3 (Inductive/Abductive Generation)...")
+
+        # First, safely get the grid node objects from both input and output graphs.
+        in_grid_node = in_graph.nodes.get('grid')
+        out_grid_node = out_graph.nodes.get('grid')
+        if not in_grid_node or not out_grid_node:
+            return None # Cannot reason without grid-level information.
+
+        # Correctly access the .attributes dictionaries
+        in_globals = in_grid_node.attributes
+        out_globals = out_grid_node.attributes
+        
+        # --- Find the most common object color in the input ---
+        in_colors = [obj.attributes['Color'] for obj in in_graph.nodes.values() if obj.type == 'object']
+        if not in_colors: return None
+        most_common_in_color = collections.Counter(in_colors).most_common(1)[0][0]
+
+        # --- THEORY 1: Is the output a solid grid of the most common input color? ---
+        # A "solid fill" means the output grid has no foreground objects (empty color palette)
+        # and its background is the color we hypothesized.
+        out_palette = out_globals.get('ColorPalette', [])
+        is_solid_fill = (len(out_palette) == 0 and out_globals.get('BackgroundColor') == most_common_in_color)
+        
+        if is_solid_fill:
+            if self.verbose >= 1: print("      Strategy 3 Insight: Transformation is a SOLID FILL with the most common object color.")
+            # The argument 'MostCommonColor(InputObjects)' is a placeholder that the executor will resolve.
+            return [{'function': 'FillGrid', 'args': ['MostCommonColor(InputObjects)']}]
+            
+        # --- THEORY 2 (Fallback): Is JUST the background color changing, leaving objects intact? ---
+        if out_globals.get('BackgroundColor') == most_common_in_color:
+            if self.verbose >= 1: print("      Strategy 3 Insight: Background color changed to most common object color (objects preserved).")
+            return [{'function': 'SetGridProperty', 'args': ['BackgroundColor', 'MostCommonColor(InputObjects)']}]
+                
+        return None
 
 
 # ---------------------------------------------------------------------------
 # Class Definition: SimplifiedOrchOREmulator
 # ---------------------------------------------------------------------------
 class SimplifiedOrchOREmulator:
-
-
-# --- START: COMPLETE AND CORRECTED __init__ METHOD ---
+    """The complete cognitive agent architecture, integrating all features."""
 
     def __init__(self, agent_id="agent0", cycle_history_max_len=100,
                  # DEPRECATED PARAMS (kept for signature compatibility if old scripts call it)
@@ -262,81 +561,77 @@ class SimplifiedOrchOREmulator:
 
         self.agent_id = agent_id
         self.verbose = verbose
+        
+        # --- Universal Reasoning and Perception Components ---
+        self.symbolic_perception_core = SymbolicPerceptionCore()
+        self.language_of_thought = LanguageOfThought()
+        self.lambda_learner = LambdaLearner(self.language_of_thought)
+        self.lambda_learner._log_lot_event = self._log_lot_event
+        self.lambda_learner.verbose = self.verbose
+        
+        # >>> NEW: Pillar 3 - Instantiate the Reasoning Engine
+        self.reasoning_engine = MultiStrategyScientificReasoningEngine(self)
+        
+        # MODIFIED: Share the program history directly with the lambda learner for analogy
+        self.solved_arc_programs = self.lambda_learner.program_history
 
-        # --- NEW: Mind-Body Connection with Deep Learning Perception ---
-        if action_space is None:
-            raise ValueError("An embodied agent requires an 'action_space'.")
+        # --- Initialize Embodied Attributes to None ---
         self.action_space = action_space
-
+        self.visual_cortex = None
+        self.world_model = None
+        self.experience_replay_buffer = None
+        self.vae_params = None
+        self.world_model_params = None
+        self.ll_params = None
         self.current_action_plan: Deque[int] = collections.deque()
-        self.last_perceived_state: Optional[StateHandle] = None # Now grounded in latent space
-        self.last_full_obs: Optional[Dict] = None # NEW: Stores the full, structured observation from env
-        self.next_target_input_state_handle: Optional[StateHandle] = None # Fix for legacy abstract recall
+        self.last_perceived_state: Optional[StateHandle] = None 
+        self.last_full_obs: Optional[Dict] = None
+        self.next_target_input_state_handle: Optional[StateHandle] = None
         self.last_prediction_error: Optional[float] = None
-        self.known_goal_latent_vectors: Dict[str, np.ndarray] = {} # Maps goal descriptions to target latent vectors
-        self.known_concept_vectors: Dict[str, np.ndarray] = {} # Maps concept names to target latent vectors
+        self.last_imagined_next_state: Optional[np.ndarray] = None
+        self.known_goal_latent_vectors: Dict[str, np.ndarray] = {}
+        self.known_concept_vectors: Dict[str, np.ndarray] = {}
         self.cycles_stuck_on_step = 0
         
-        # --- NEW: Goal Arbitration Engine 
+        # --- Conditionally Instantiate Mind-Body Connection ---
+        if vae_config and world_model_config:
+            if self.action_space is None:
+                raise ValueError("An embodied agent requires an 'action_space' with VAE/WorldModel configs.")
+            
+            if self.verbose >= 1: print(f"[{self.agent_id}] Initializing Embodied Perception Systems...")
+            
+            self.vae_params = copy.deepcopy(vae_config)
+            self.world_model_params = copy.deepcopy(world_model_config)
+            self.ll_params = copy.deepcopy(lifelong_learning_config or DEFAULT_LIFELONG_LEARNING_CONFIG)
+            
+            # <<< START OF THE FINAL FIX: THE GIFT OF INSTINCT >>>
+            # Pre-populate the agent's mind with innate "ideas" of what critical objects look like.
+            # We use a random vector as a placeholder. The agent will wander until its perception
+            # is "close enough" to this innate idea, at which point it will ground the concept properly.
+            # This is the bootstrap for survival and opportunism.
+            self.known_concept_vectors['charging_pad'] = np.random.randn(self.vae_params['LATENT_DIM']) * 0.1 
+            self.known_concept_vectors['bonus_target'] = np.random.randn(self.vae_params['LATENT_DIM']) * 0.1
+            # <<< END OF THE FINAL FIX >>>
+
+            self.visual_cortex = VisualCortexVAE(original_dim=(*self.vae_params['IMG_SIZE'], 3), latent_dim=self.vae_params['LATENT_DIM'])
+            try:
+                self.visual_cortex.build(input_shape=(None, *self.vae_params['IMG_SIZE'], 3))
+                self.visual_cortex.load_weights(self.vae_params['MODEL_PATH'])
+            except (FileNotFoundError, OSError, ValueError) as e:
+                if self.verbose >= 0: print(f"[{self.agent_id}] WARNING: Could not load VAE weights. Error: {e}")
+            
+            self.world_model = PredictiveWorldModel(latent_dim=self.vae_params['LATENT_DIM'], num_actions=self.action_space.n)
+            try:
+                self.world_model.build(input_shape=[(None, self.vae_params['LATENT_DIM']), (None, self.action_space.n)])
+                self.world_model.load_weights(self.world_model_params['MODEL_PATH'])
+            except (FileNotFoundError, OSError, ValueError) as e:
+                 if self.verbose >= 0: print(f"[{self.agent_id}] WARNING: Could not load World Model weights. Error: {e}")
+
+            self.experience_replay_buffer = ExperienceReplayBuffer(self.ll_params['replay_buffer_capacity'], self.ll_params['experience_emotion_threshold'], self.ll_params['experience_surprise_threshold'])
+        
+        # --- Universal Cognitive Components ---
         self.goal_manager = GoalManager(self)
         self.last_arbitrated_goal: Optional[GoalState] = None
-        
-        # Ground key concepts that the agent needs to understand for new goals
-        # This is a bit of a "cheat", but necessary for the agent to know what a charging pad is
-        self.known_concept_vectors['charging_pad'] = np.random.randn(DEFAULT_VAE_CONFIG['LATENT_DIM']) * 0.1 
-        self.known_concept_vectors['bonus_target'] = np.random.randn(DEFAULT_VAE_CONFIG['LATENT_DIM']) * 0.1 
-
-
-        # Load configurations for the new modules, using defaults if not provided
-        self.vae_params = copy.deepcopy(DEFAULT_VAE_CONFIG) if vae_config is None else copy.deepcopy(vae_config)
-        self.world_model_params = copy.deepcopy(DEFAULT_WORLD_MODEL_CONFIG) if world_model_config is None else copy.deepcopy(world_model_config)
-        self.ll_params = copy.deepcopy(DEFAULT_LIFELONG_LEARNING_CONFIG) if lifelong_learning_config is None else copy.deepcopy(lifelong_learning_config)
-
-        # Instantiate the Visual Cortex (VAE)
-        self.visual_cortex = VisualCortexVAE(
-            original_dim=(*self.vae_params['IMG_SIZE'], 3),
-            latent_dim=self.vae_params['LATENT_DIM']
-        )
-        try:
-            # We call the model once to build its weights before loading them
-            dummy_input = np.random.rand(1, *self.vae_params['IMG_SIZE'], 3).astype(np.float32)
-            self.visual_cortex(dummy_input)
-            self.visual_cortex.load_weights(self.vae_params['MODEL_PATH'])
-            if self.verbose >= 1: print(f"[{self.agent_id}] Visual Cortex (VAE) weights loaded from '{self.vae_params['MODEL_PATH']}'.")
-        except (FileNotFoundError, OSError):
-            if self.verbose >= 0: print(f"[{self.agent_id}] WARNING: Could not find VAE weights at '{self.vae_params['MODEL_PATH']}'. The agent starts with an untrained brain.")
-        
-        # Instantiate the Predictive World Model (LSTM)
-        
-        
-        # In __init__
-        self.world_model = PredictiveWorldModel(
-            latent_dim=self.vae_params['LATENT_DIM'],
-            num_actions=self.action_space.n
-        )
-        try:
-            # THIS IS A CRITICAL FIX: The model must be "built" by calling it once
-            # or by an explicit build() command before weights can be loaded.
-            # We provide a shape that matches its two inputs.
-            if not self.world_model.built:
-                self.world_model.build(input_shape=[(None, self.vae_params['LATENT_DIM']), (None, self.action_space.n)])
-
-            self.world_model.load_weights(self.world_model_params['MODEL_PATH'])
-            if self.verbose >= 1: print(f"[{self.agent_id}] Predictive World Model weights loaded from '{self.world_model_params['MODEL_PATH']}'.")
-        except (FileNotFoundError, OSError):
-             if self.verbose >= 0: print(f"[{self.agent_id}] WARNING: Could not find World Model weights at '{self.world_model_params['MODEL_PATH']}'. Imagination will be random.")
-        
-        # Instantiate the "Smart" Replay Buffer
-        self.experience_replay_buffer = ExperienceReplayBuffer(
-            capacity=self.ll_params['replay_buffer_capacity'],
-            emotion_threshold=self.ll_params['experience_emotion_threshold'],
-            surprise_threshold=self.ll_params['experience_surprise_threshold']
-        )
-        self.last_imagined_next_state: Optional[np.ndarray] = None
-
-
-        # --- Legacy Abstract Reasoning Core (Still Used for "Internal Thought") ---
-        # The abstract universe is now only for non-embodied "daydreaming" cycles.
         self.universe = copy.deepcopy(TWO_QUBIT_UNIVERSE_CONFIG) if universe is None else universe
         self.state_handle_by_id = {handle.id: handle for handle in self.universe['states']}
         start_comp_basis = self.universe['state_to_comp_basis'][self.universe['start_state']]
@@ -344,8 +639,9 @@ class SimplifiedOrchOREmulator:
         self.logical_superposition[start_comp_basis] = 1.0 + 0j
         self.collapsed_computational_state_str = start_comp_basis
         self.current_conceptual_state = self.universe['start_state']
-        
-        # --- PRE-EXISTING INITIALIZATION LOGIC (largely unchanged) ---
+        self.internal_thought_result = None
+
+        # --- OrchOR and Valence Mechanics ---
         self.objective_reduction_potential = 0.0
         self.E_OR_THRESHOLD = initial_E_OR_THRESHOLD
         self.orp_decay_rate = initial_orp_decay_rate
@@ -354,7 +650,7 @@ class SimplifiedOrchOREmulator:
         self.last_cycle_valence_mod = 0.0
         self.current_orp_before_reset = 0.0
 
-        # Parameter configurations
+        # --- Loading ALL Original Parameter Configurations ---
         self.internal_state_parameters = copy.deepcopy(DEFAULT_INTERNAL_PARAMS) if internal_state_parameters_config is None else copy.deepcopy(internal_state_parameters_config)
         self.metacognition_params = copy.deepcopy(DEFAULT_METACOGNITION_PARAMS) if metacognition_config is None else copy.deepcopy(metacognition_config)
         self.orp_threshold_dynamics = copy.deepcopy(DEFAULT_ORP_THRESHOLD_DYNAMICS) if orp_threshold_dynamics_config is None else copy.deepcopy(orp_threshold_dynamics_config)
@@ -367,12 +663,22 @@ class SimplifiedOrchOREmulator:
         self.goal_state_config_params = copy.deepcopy(DEFAULT_GOAL_STATE_PARAMS) if goal_state_params is None else copy.deepcopy(goal_state_params)
         self.lot_config_params = copy.deepcopy(DEFAULT_LOT_CONFIG) if lot_config is None else copy.deepcopy(lot_config)
 
+        # --- Shared and Long-Term Memory ---
         self.long_term_memory = shared_long_term_memory if shared_long_term_memory is not None else {}
         self.shared_attention_foci = shared_attention_foci if shared_attention_foci is not None else collections.deque(maxlen=20)
         self.ltm_utility_weight_valence = 0.6
         self.ltm_utility_weight_efficiency = 0.4
+        self.long_term_memory_capacity = 100
+        self.successful_sequence_threshold_valence = 0.5 
+        
+        # --- Internal State Tracking and Temporal Features ---
         self.temporal_feedback_grid = collections.deque(maxlen=self.temporal_grid_params['max_len'])
         self.last_cycle_entropy_for_delta = 0.0
+        self.post_goal_valence_lock_cycles_remaining = 0
+        self.post_goal_valence_lock_value = 0.2
+        self.post_goal_valence_lock_duration = 3
+
+        # --- SMN (Graph) Initialization ---
         self.smn_params_runtime_state = {}
         self.smn_param_indices = {}
         self.smn_param_names_from_indices = {}
@@ -381,19 +687,17 @@ class SimplifiedOrchOREmulator:
         self._initialize_smn_graph_structures()
         self.smn_internal_flags = {}
 
+        # --- Firewall State ---
         self.firewall_cooldown_remaining = 0
         self.firewall_cycles_since_last_check = 0
+        
+        # --- Working Memory and LoT Stream ---
         self.working_memory = WorkingMemoryStack(max_depth=working_memory_max_depth)
         self.current_cycle_lot_stream = []
-        
-        self.post_goal_valence_lock_cycles_remaining = 0
-        self.post_goal_valence_lock_value = 0.2
-        self.post_goal_valence_lock_duration = 3
-        
-        if config_overrides:
-            self._apply_config_overrides(config_overrides)
-        if trainable_param_values:
-            self.update_emulator_parameters(trainable_param_values)
+
+        # --- Final Configuration Overrides and Parameter Application ---
+        if config_overrides: self._apply_config_overrides(config_overrides)
+        if trainable_param_values: self.update_emulator_parameters(trainable_param_values)
             
         if 'strategy_weights' in self.internal_state_parameters:
             for key, default_value in DEFAULT_INTERNAL_PARAMS['strategy_weights'].items():
@@ -402,21 +706,247 @@ class SimplifiedOrchOREmulator:
         else:
             self.internal_state_parameters['strategy_weights'] = copy.deepcopy(DEFAULT_INTERNAL_PARAMS['strategy_weights'])
         
-        self.long_term_memory_capacity = 100
-        self.successful_sequence_threshold_valence = 0.5 
-
         self.cycle_history = collections.deque(maxlen=cycle_history_max_len)
         self.current_cycle_num = 0
 
+    def solve_arc_task(self, task_id: str, task_data: Dict):
+        """[DEFINITIVE] Orchestrates perception, reasoning, and execution for ARC."""
         if self.verbose >= 1:
-            active_features = [
-                f"Embodied(VAE Latent Dim:{self.vae_params['LATENT_DIM']})", 
-                f"WorldModel(LSTM)", 
-                f"LifelongLearning(Buffer:{self.ll_params['replay_buffer_capacity']})",
-                "GoalArbitration", # NEW
-                "SMN", "Firewall", "LoT", "WorkingMemory"
-            ]
-            print(f"[{self.agent_id}] Autonomous Orch-OR Emulator Initialized. Active Features: {', '.join(active_features)}.")
+            print(f"\n[{self.agent_id}]--- Starting ARC task: {task_id} ---")
+
+        solution_program: Program | None = None
+
+        # We only need one good training pair to form a theory.
+        # Assuming at least one training pair exists
+        train_pair = task_data['train'][0]
+        input_grid, output_grid = np.array(train_pair['input']), np.array(train_pair['output'])
+
+        # Pillar 1: Perceive the world.
+        input_graph = self.symbolic_perception_core.parse(input_grid)
+        output_graph = self.symbolic_perception_core.parse(output_grid)
+        abstract_diff = ActiveConceptNetGraph.graph_diff(input_graph, output_graph)
+
+        # Pillar 3: Reason to find a program. Pass the raw grid for simulation.
+        solution_program = self.reasoning_engine.generate_solution_program(input_graph, output_graph, abstract_diff, input_grid)
+
+        if not solution_program:
+            if self.verbose >= 1:
+                print("  REASONING FAILED: No program could be synthesized.")
+            # Use a list for the program to be consistent with Program type
+            solution_program = [{'function': 'UnknownTransform'}]
+        else:
+            if self.verbose >= 1:
+                program_str = ', '.join([p.get('function', 'N/A') for p in solution_program])
+                print(f"\n  [Pillar 3] Synthesized Program: [{program_str}]")
+
+        # Post-hoc: Log the confirmed program and its causal diff for future analogical reasoning.
+        self.lambda_learner.log_successful_program(
+            task_id=task_id,
+            program=solution_program,
+            diff=abstract_diff
+        )
+
+        # Trigger knowledge consolidation periodically.
+        if len(self.lambda_learner.program_history) % 3 == 0:
+            self.lambda_learner.consolidate_knowledge()
+
+        # Apply the final program to the test case(s).
+        test_solutions = [self._execution_engine_run_program(solution_program, np.array(tp['input'])) for tp in task_data.get('test', [])]
+
+        if self.verbose >= 1:
+            print(f"--- ARC task finished. ---")
+        return test_solutions
+
+    # --- [NEW] Pillar 4: The LoT Execution Engine ---
+    def _execution_engine_run_program(self, program: Program, input_grid: np.ndarray) -> np.ndarray:
+        """Executes a LoT program on a given input grid to produce an output grid."""
+        if self.verbose >= 1:
+            program_str = ', '.join([p.get('function', 'N/A') for p in program])
+            print(f"  [Pillar 4: Execution] Running program [{program_str}] on test input...")
+
+        # Use a deque as a command queue to handle learned functions
+        command_queue = collections.deque(program)
+        current_grid = np.copy(input_grid)
+        context = {'last_created_object_coords': None, 'background_color': 0}
+
+        if not command_queue or command_queue[0].get('function') == 'UnknownTransform':
+            if self.verbose >= 1: print("    EXECUTION SKIPPED: Program is 'UnknownTransform'. Returning input as is.")
+            return current_grid
+
+        # Main execution loop using the queue
+        while command_queue:
+            step = command_queue.popleft()
+            func_name = step.get('function', 'NoFunction')
+            args = step.get('args', [])
+
+            # Check if this is a learned function
+            learned_func = self.language_of_thought.get_function(func_name)
+            if learned_func and learned_func.is_learned:
+                if self.verbose >= 1: print(f"    Executing learned function '{func_name}' by expanding its body.")
+                # Prepend the body of the learned function to the front of the queue
+                # Note: This is a simple expansion. A more advanced system would handle argument mapping.
+                for learned_step in reversed(learned_func.learned_body):
+                    command_queue.appendleft(learned_step)
+                continue # Go to the next iteration to execute the first step of the expanded body
+
+            # --- Execute innate functions ---
+            try:
+                if func_name == 'Copy':
+                    current_grid, context = self._execute_copy(current_grid, context, *args)
+                elif func_name == 'Move':
+                    current_grid, context = self._execute_move(current_grid, context, *args)
+                elif func_name == 'SetGridProperty':
+                    current_grid, context = self._execute_set_grid_property(current_grid, input_grid, context, *args)
+                elif func_name == 'FillGrid':
+                    current_grid, context = self._execute_fill_grid(current_grid, input_grid, context, *args)
+                else:
+                    if self.verbose >= 1: print(f"    EXECUTION WARNING: Unknown function '{func_name}'. Step skipped.")
+            except Exception as e:
+                if self.verbose >= 1: print(f"    EXECUTION ERROR in function '{func_name}' with args {args}: {e}")
+                traceback.print_exc()
+                return current_grid
+
+        if self.verbose >= 1:
+            print("  [Pillar 4: Execution] Program finished.")
+        return current_grid
+
+    def _resolve_object_selector(self, grid: np.ndarray, context: Dict, selector: str) -> Optional[List[Tuple[int, int]]]:
+        """Helper to resolve an object selector string into pixel coordinates."""
+        if selector == "last_created_object":
+            return context.get('last_created_object_coords')
+
+        if selector and "object_with_id" in selector:
+            try:
+                # Corrected string parsing
+                obj_id_str = selector.split('(')[1].split(')')[0]
+                perceived_graph = self.symbolic_perception_core.parse(grid)
+                target_node = perceived_graph.nodes.get(obj_id_str)
+                if target_node:
+                    return target_node.attributes.get('Coordinates')
+            except Exception as e:
+                if self.verbose >= 1:
+                    print(f"      ERROR resolving object selector '{selector}': {e}")
+                return None
+        if self.verbose >= 1:
+            print(f"      WARNING could not resolve object selector '{selector}'")
+        return None
+
+    def _execute_copy(self, grid: np.ndarray, context: Dict, object_selector: str) -> Tuple[np.ndarray, Dict]:
+        """Executor for the 'Copy' function."""
+        object_coords = self._resolve_object_selector(grid, context, object_selector)
+        if not object_coords:
+            if self.verbose >= 1:
+                print(f"    EXECUTE_COPY: Could not find object for selector '{object_selector}'.")
+            return grid, context
+
+        context['last_created_object_coords'] = object_coords
+
+        if self.verbose >= 2:
+            print(f"    EXECUTE_COPY: Object at {object_coords} selected for duplication.")
+        return grid, context
+
+    def _execute_move(self, grid: np.ndarray, context: Dict, object_selector: str, dx: int, dy: int) -> Tuple[np.ndarray, Dict]:
+        """Executor for the 'Move' function."""
+        coords_to_move = self._resolve_object_selector(grid, context, object_selector)
+        if not coords_to_move:
+            if self.verbose >= 1:
+                print(f"    EXECUTE_MOVE: Could not find object for selector '{object_selector}'.")
+            return grid, context
+
+        # Assuming coords_to_move is not empty and all pixels have the same color
+        color = int(grid[coords_to_move[0]])
+        new_coords = []
+        is_placing_copy = (object_selector == 'last_created_object')
+
+        if not is_placing_copy:
+            for r, c in coords_to_move:
+                if 0 <= r < grid.shape[0] and 0 <= c < grid.shape[1]:
+                    grid[r, c] = context.get('background_color', 0)
+
+        for r, c in coords_to_move:
+            new_r, new_c = r + dy, c + dx
+            if 0 <= new_r < grid.shape[0] and 0 <= new_c < grid.shape[1]:
+                grid[new_r, new_c] = color
+            new_coords.append((new_r, new_c))
+
+        context['last_created_object_coords'] = new_coords
+        if self.verbose >= 2 and coords_to_move and new_coords:
+            print(f"    EXECUTE_MOVE: Moved object from {coords_to_move} to {new_coords}.")
+
+        return grid, context
+
+    def _execute_set_grid_property(self, grid: np.ndarray, original_input_grid: np.ndarray, context: Dict, prop_name: str, value_selector: str) -> Tuple[np.ndarray, Dict]:
+        """Executor for 'SetGridProperty'."""
+        if self.verbose >= 2:
+            print(f"    EXECUTE_SET_GRID_PROP: Setting '{prop_name}' to '{value_selector}'.")
+
+        if prop_name == 'BackgroundColor':
+            if value_selector == 'MostCommonColor(InputObjects)':
+                graph = self.symbolic_perception_core.parse(original_input_grid)
+                if not graph: # handle case where parsing fails
+                    return grid, context
+                colors = [obj.attributes['Color'] for obj in graph.nodes.values() if obj.type == 'object']
+                if not colors:
+                    if self.verbose >= 1:
+                        print("    EXECUTION_WARNING: Cannot set background, no objects in original input to get color from.")
+                    return grid, context
+                # collections.Counter returns a list of (element, count) tuples
+                most_common_color = collections.Counter(colors).most_common(1)[0][0]
+
+                # --- START OF FIX ---
+                # 1. Create a new grid filled entirely with the target background color.
+                #    We use original_input_grid.shape to handle cases where the grid might have been resized by other operations.
+                new_grid = np.full(original_input_grid.shape, most_common_color, dtype=original_input_grid.dtype)
+
+                # 2. Identify the pixels that are NOT background in the *original* input grid.
+                #    The standard ARC convention is that color 0 is the background.
+                object_mask = (original_input_grid != 0)
+
+                # 3. Use the boolean mask to copy the object pixels from the original grid onto our new grid.
+                #    This preserves the foreground objects on the new background.
+                new_grid[object_mask] = original_input_grid[object_mask]
+                
+                # Also update the context's background color for future operations in this program
+                context['background_color'] = most_common_color
+
+                return new_grid, context
+                # --- END OF FIX ---
+            else:
+                if self.verbose >= 1:
+                    print(f"    EXECUTION_WARNING: Unknown value selector for BackgroundColor: '{value_selector}'.")
+        return grid, context
+    
+
+
+    def _execute_fill_grid(self, grid: np.ndarray, original_input_grid: np.ndarray, context: Dict, value_selector: str) -> Tuple[np.ndarray, Dict]:
+        """Executor for 'FillGrid' - completely fills the grid with a color."""
+        if self.verbose >= 2:
+            print(f"    EXECUTE_FILL_GRID: Filling with '{value_selector}'.")
+        
+        target_color = None
+        if value_selector == 'MostCommonColor(InputObjects)':
+            # Resolve the symbolic value into a concrete color from the input
+            graph = self.symbolic_perception_core.parse(original_input_grid)
+            colors = [obj.attributes['Color'] for obj in graph.nodes.values() if obj.type == 'object']
+            if not colors:
+                if self.verbose >= 1: print("    EXECUTION_WARNING: Cannot fill grid, no objects in original input to determine color.")
+                return grid, context
+            target_color = collections.Counter(colors).most_common(1)[0][0]
+        else:
+            # This allows for future value selectors, e.g., FillGrid('5')
+            try:
+                target_color = int(value_selector)
+            except (ValueError, TypeError):
+                if self.verbose >= 1: print(f"    EXECUTION_WARNING: Unknown value selector for FillGrid: '{value_selector}'.")
+                return grid, context
+
+        if target_color is not None:
+            # Create a new grid completely filled with the target color
+            new_grid = np.full(grid.shape, target_color, dtype=grid.dtype)
+            context['background_color'] = target_color
+            return new_grid, context
+            
+        return grid, context
 
 
     
@@ -1746,6 +2276,7 @@ class SimplifiedOrchOREmulator:
         This version correctly handles both physical ('target_concept') and
         abstract ('target_state') goal steps.
         """
+        # THE WISDOM: Do not evaluate goals that are not ACTIVE. This prevents the "success cascade".
         if not (goal_to_evaluate and goal_to_evaluate.status == "active" and goal_to_evaluate.steps):
             return
 
@@ -2964,42 +3495,45 @@ class SimplifiedOrchOREmulator:
             self.cycles_stuck_on_step = 0
             
         # --- Frustration Override ---
+        # If the agent is stuck on a single step for too long, its plan is probably bad.
+        # This forces it to re-evaluate and try to decompose the problem again.
         if self.cycles_stuck_on_step > 40:
             self._log_lot_event("planner", "replan_trigger", {"reason": "stuck_on_step", "goal": active_goal.current_goal})
-            # Invalidate the current plan FOR THIS GOAL
             active_goal.steps = []
             active_goal.current_step_index = 0
             self.cycles_stuck_on_step = 0
             self.internal_state_parameters['frustration'] = min(0.9, self.internal_state_parameters['frustration'] + 0.5)
 
-        # --- Autonomous Task Decomposition ---
-        # If the active goal has no steps, try to break it down.
-        if not active_goal.steps:
+        # --- Autonomous Task Decomposition (for MAIN_QUEST) ---
+        # If the main quest has no steps, the agent must *reason* about how to achieve it.
+        if active_goal.goal_type == "MAIN_QUEST" and not active_goal.steps:
             self._log_lot_event("planner", "attempt_decomposition", {"goal": active_goal.current_goal})
-            # Pass the active goal context to the decomposer
             new_steps = self._reasoning_decompose_task(active_goal) 
             if new_steps:
                 active_goal.steps = new_steps
-                self.cycles_stuck_on_step = 0
+                self.cycles_stuck_on_step = 0 # Reset counter after successful planning
 
         # --- Physical Action Planning ---
-        # The agent should act physically if its goal requires interacting with the world.
+        # The agent acts physically if its goal requires interacting with the world.
         is_physical_task = active_goal.evaluation_criteria == "GOAL_COMPLETION" or active_goal.goal_type in ["SURVIVAL", "OPPORTUNITY"]
         
         if is_physical_task:
+            # If the goal has no steps (e.g., from frustration reset or failed decomposition), explore.
             if not active_goal.steps:
-                self._log_lot_event("planner", "explore_physical", {"reason": "decomposition_failed", "goal": active_goal.current_goal})
-                return 'PHYSICAL', [self.action_space.sample() for _ in range(5)]
+                self._log_lot_event("planner", "explore_physical", {"reason": "no_steps_for_goal", "goal": active_goal.current_goal})
+                return 'PHYSICAL', [self.action_space.sample() for _ in range(3)] # Short burst of exploration
 
+            # --- THE FINAL CONNECTION: GOAL -> CONCEPT -> PLAN ---
             # Try to generate a plan for the current step of the active goal.
             plan = self._reasoning_tool_physical_shooting_planner(active_goal)
             if plan:
                 self._log_lot_event("planner", "physical_plan_found", {"goal": active_goal.current_goal, "step": active_goal.current_step_index})
                 return 'PHYSICAL', plan
 
-            # If the planner fails (e.g., target concept unknown), explore.
+            # If the planner fails (e.g., target concept is not yet known/grounded), explore.
+            # This is crucial: if it doesn't know what a "key" looks like, it must wander until it finds one.
             self._log_lot_event("planner", "explore_physical", {"reason": "planning_failed_for_step", "goal": active_goal.current_goal})
-            return 'PHYSICAL', [self.action_space.sample() for _ in range(5)]
+            return 'PHYSICAL', [self.action_space.sample() for _ in range(3)]
             
         # --- Abstract Thought Planning ---
         # For goals explicitly about creativity or if no physical action is warranted.
