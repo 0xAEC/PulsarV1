@@ -69,6 +69,101 @@ class StateHandle:
         return f"StateHandle(id='{self.id}', latent_vector_shape={self.latent_vector.shape}, properties={self.properties})"
 
 
+@dataclass
+class SymbolicObject:
+    """Represents a single perceived entity (e.g., an object in an ARC grid)."""
+    id: str
+    type: str = 'object'
+    attributes: Dict[str, Any] = field(default_factory=dict)
+
+    def __str__(self):
+        return f"SymbolicObject(id={self.id}, type={self.type}, attrs={list(self.attributes.keys())})"
+
+class ActiveConceptNetGraph:
+    """
+    The Scientist's Whiteboard. A dynamic graph held in working memory,
+    representing the agent's complete, structured understanding of the current
+    problem state. It is built by the SymbolicPerceptionCore.
+    """
+    def __init__(self):
+        self.nodes: Dict[str, SymbolicObject] = {}
+        self.edges: List[Dict[str, Any]] = []
+
+    def add_node(self, node: SymbolicObject):
+        """Adds a symbolic object to the graph."""
+        self.nodes[node.id] = node
+
+    def add_edge(self, source_id: str, target_id: str, relation: str, **kwargs):
+        """Adds a relationship edge between two nodes."""
+        if source_id in self.nodes and target_id in self.nodes:
+            self.edges.append({
+                "source": source_id,
+                "target": target_id,
+                "relation": relation,
+                "attributes": kwargs
+            })
+
+    def __str__(self):
+        return f"ConceptNet(Nodes: {len(self.nodes)}, Edges: {len(self.edges)})"
+
+    @staticmethod
+    def graph_diff(graph_before: 'ActiveConceptNetGraph', graph_after: 'ActiveConceptNetGraph') -> Dict[str, Any]:
+        """
+        The crucial "Diff" Operation. Compares two ConceptNet graphs to find
+        the abstract changes, which becomes the input for hypothesis generation.
+        """
+        diff = {
+            'nodes_added': [],
+            'nodes_removed': [],
+            'attributes_changed': [],
+            'edges_added': [],
+            'edges_removed': []
+        }
+        
+        nodes_before_ids = set(graph_before.nodes.keys())
+        nodes_after_ids = set(graph_after.nodes.keys())
+
+        # Find added and removed nodes
+        added_ids = nodes_after_ids - nodes_before_ids
+        removed_ids = nodes_before_ids - nodes_after_ids
+        
+        for node_id in added_ids:
+            diff['nodes_added'].append(graph_after.nodes[node_id].attributes)
+        for node_id in removed_ids:
+            diff['nodes_removed'].append(graph_before.nodes[node_id].attributes)
+            
+        # Find attribute changes on common nodes
+        common_ids = nodes_before_ids.intersection(nodes_after_ids)
+        for node_id in common_ids:
+            obj_before = graph_before.nodes[node_id]
+            obj_after = graph_after.nodes[node_id]
+            
+            all_keys = set(obj_before.attributes.keys()) | set(obj_after.attributes.keys())
+            for key in all_keys:
+                val_before = obj_before.attributes.get(key)
+                val_after = obj_after.attributes.get(key)
+                if str(val_before) != str(val_after): # Use string comparison for robustness
+                    diff['attributes_changed'].append({
+                        'id': node_id,
+                        'attribute': key,
+                        'from': val_before,
+                        'to': val_after
+                    })
+        
+        # Simple edge diff (can be made more sophisticated later)
+        # For now, just detects if the number of edges of a certain type has changed.
+        # A more detailed diff would compare specific edge connections.
+        edges_before_summary = collections.Counter(e['relation'] for e in graph_before.edges)
+        edges_after_summary = collections.Counter(e['relation'] for e in graph_after.edges)
+        if edges_before_summary != edges_after_summary:
+            diff['edges_changed_summary'] = {
+                'from': dict(edges_before_summary),
+                'to': dict(edges_after_summary)
+                }
+
+        return diff
+
+
 # -----------------------------------------------------------------------------------------------
 # Working Memory Components 
 # -----------------------------------------------------------------------------------------------
@@ -254,3 +349,75 @@ class GoalState:
 
         return (f"Goal({self.goal_type}): '{goal_desc_str}' (Step: '{final_step_display}', "
                 f"Prio: {self.base_priority:.2f}, Status: {self.status}){primer_info}")
+    
+    # ---------------------------------------------------------------------------
+# >>> NEW: Pillar 2 - Language of Thought Abstractions
+# ---------------------------------------------------------------------------
+
+# A program is simply a list of function calls.
+Program = List[Dict[str, Any]]
+
+@dataclass
+class Function:
+    """Represents a function in the agent's LoT, either innate or learned."""
+    name: str
+    body: Callable # For innate functions, this is a direct Python callable.
+    is_learned: bool = False
+    docstring: str = ""
+    # For learned functions, we store the original abstracted body
+    learned_body: Program = field(default_factory=list)
+
+class LanguageOfThought:
+    """
+    A library holding the agent's entire cognitive vocabulary. It contains both
+    innate (hard-coded) functions and learned abstractions.
+    """
+    def __init__(self):
+        self.innate_functions = self._get_innate_alphabet()
+        self.learned_functions: Dict[str, Function] = {}
+
+    def get_function(self, name: str) -> Function | None:
+        """Retrieves a function by name from either the innate or learned set."""
+        return self.learned_functions.get(name) or self.innate_functions.get(name)
+
+    def _get_innate_alphabet(self) -> Dict[str, Function]:
+        """Defines the hard-coded, primitive cognitive operations."""
+        
+        # Helper to create the standard function dictionary structure
+        def make_func_call(func_name, *args):
+             return {'function': func_name, 'args': list(args)}
+
+        # Note: These functions do not EXECUTE the logic. They RETURN a
+        # representation of the function call. The execution is handled by
+        # an interpreter in Pillar 3. This keeps the language pure.
+        
+        # --- Data/Object Manipulation ---
+        Move = Function('Move', lambda obj, dx, dy: make_func_call('Move', obj, dx, dy), docstring="Moves an object by a delta.")
+        Copy = Function('Copy', lambda obj: make_func_call('Copy', obj), docstring="Copies an object.")
+        Recolor = Function('Recolor', lambda obj, color: make_func_call('Recolor', obj, color), docstring="Changes the color of an object.")
+        Delete = Function('Delete', lambda obj: make_func_call('Delete', obj), docstring="Deletes an object.")
+
+        # --- Grid-level Manipulation ---
+        FillGrid = Function('FillGrid', lambda color: make_func_call('FillGrid', color), docstring="Fills the entire grid with a single color.")
+        SetGridProperty = Function('SetGridProperty', lambda prop, val: make_func_call('SetGridProperty', prop, val), docstring="Sets a global property of the grid, like background color.")
+
+        # --- Data Access & Querying ---
+        Filter = Function('Filter', lambda collection, predicate: make_func_call('Filter', collection, predicate), docstring="Filters a collection based on a condition.")
+        GetProperty = Function('GetProperty', lambda entity, key: make_func_call('GetProperty', entity, key), docstring="Retrieves a property from an entity.")
+        Count = Function('Count', lambda collection: make_func_call('Count', collection), docstring="Counts items in a collection.")
+        
+        # --- Control Flow ---
+        Map = Function('Map', lambda collection, operation: make_func_call('Map', collection, operation), docstring="Applies an operation to each item in a collection.")
+
+        innate_map = {f.name: f for f in [
+            Move, Copy, Recolor, Delete,
+            FillGrid, SetGridProperty,
+            Filter, GetProperty, Count,
+            Map
+        ]}
+        return innate_map
+
+    def add_learned_function(self, new_function: Function):
+        """Adds a new function created by the LambdaLearner to the LoT."""
+        if new_function.name not in self.innate_functions:
+            self.learned_functions[new_function.name] = new_function
