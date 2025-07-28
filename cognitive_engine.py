@@ -19,6 +19,8 @@ import traceback
 import heapq
 import math
 import gymnasium as gym
+import pickle 
+import os
 
 
 from typing import List, Dict, Any, Deque, Optional, Tuple
@@ -130,26 +132,26 @@ class GoalManager:
 
         # --- Survival Goal Management ---
         agent_energy = obs.get('agent_energy', np.array([100.0]))[0]
-        # Use a lower threshold to add the goal to prevent flip-flopping
-        if agent_energy < 80.0 and not self._survival_goal_active:
+        survival_goal_exists = any(g.goal_type == 'SURVIVAL' for g in self.goals)
+
+        if agent_energy < 80.0 and not survival_goal_exists:
             survival_goal = GoalState(
                 current_goal="Maintain Energy",
                 goal_type="SURVIVAL",
                 base_priority=0.8,
+                # Always ensure the step is correctly defined upon creation
                 steps=[{"name": "Recharge", "target_concept": "charging_pad"}]
             )
             self.add_goal(survival_goal)
             self._survival_goal_active = True
-        # Once energy is full, the goal can be considered "completed" for now
-        elif agent_energy >= 99.0 and self._survival_goal_active:
+        elif agent_energy >= 99.0 and survival_goal_exists:
+            # When energy is full, the survival goal is no longer relevant and can be removed.
             self.goals = [g for g in self.goals if g.goal_type != 'SURVIVAL']
             self._survival_goal_active = False
             self.agent._log_lot_event("goal_manager", "survival_goal_deactivated", {"energy": agent_energy})
 
-
         # --- Opportunity Goal Management ---
         bonus_loc = obs.get('bonus_target_loc')
-        bonus_timer = obs.get('bonus_target_timer', np.array([0]))[0]
         opportunity_goal_exists = any(g.goal_type == 'OPPORTUNITY' for g in self.goals)
 
         if bonus_loc is not None and bonus_loc[0] != -1 and not opportunity_goal_exists:
@@ -157,12 +159,13 @@ class GoalManager:
                 current_goal="Seize Opportunity",
                 goal_type="OPPORTUNITY",
                 base_priority=0.6,
+                # Always ensure the step is correctly defined upon creation
                 steps=[{"name": "Collect Bonus", "target_concept": "bonus_target"}]
             )
             self.add_goal(opportunity_goal)
             self.agent._log_lot_event("goal_manager", "opportunity_goal_activated", {})
         elif (bonus_loc is None or bonus_loc[0] == -1) and opportunity_goal_exists:
-            # Remove opportunity goal if it no longer exists in the world
+            # Remove the opportunity goal if the bonus disappears from the world.
             self.goals = [g for g in self.goals if g.goal_type != 'OPPORTUNITY']
             self.agent._log_lot_event("goal_manager", "opportunity_goal_deactivated", {})
 
@@ -173,14 +176,16 @@ class GoalManager:
             return None
 
         urgency_scores = {}
-        # THE CRITICAL FIX: Only consider goals that are NOT completed or failed.
+        # --- FIX #1: THE CRITICAL LOGIC FIX ---
+        # Only consider goals that are NOT completed or failed for arbitration.
+        # This prevents the agent from getting stuck on a finished task.
         for goal in self.goals:
             if goal.status in ['active', 'pending']:
                 urgency = self._calculate_urgency(goal)
                 urgency_scores[goal.current_goal] = (urgency, goal)
         
         if not urgency_scores:
-            # This can happen if all goals are completed.
+            # This can happen if all available goals are completed/failed.
             return None
 
         # Select the goal with the highest urgency
@@ -220,11 +225,12 @@ class GoalManager:
             goal_bias = self.agent.internal_state_parameters['goal_seeking_bias']
             frustration_penalty = self.agent.internal_state_parameters['frustration'] * 0.5
             
-            # --- THE FINAL FIX: THE "CONSCIENCE" ---
-            # If the agent is stuck on a single step of the main quest, its urgency grows.
-            # This represents a growing impatience and a desire to make progress on its primary purpose.
+            # --- FIX #2: THE "CONSCIENCE" ---
+            # If the agent is stuck or distracted, its main purpose becomes more urgent.
+            # This represents a growing impatience to make progress on its primary quest.
             impatience_bonus = 0.0
             if self.agent.last_arbitrated_goal and self.agent.last_arbitrated_goal.current_goal == goal.current_goal:
+                 # Bonus increases the longer it is stuck on a single step of the main quest
                  impatience_bonus = self.agent.cycles_stuck_on_step * 0.015 
 
             urgency = goal.base_priority + goal_bias - frustration_penalty + impatience_bonus
@@ -594,6 +600,7 @@ class SimplifiedOrchOREmulator:
         self.cycles_stuck_on_step = 0
         
         # --- Conditionally Instantiate Mind-Body Connection ---
+        # --- Conditionally Instantiate Mind-Body Connection ---
         if vae_config and world_model_config:
             if self.action_space is None:
                 raise ValueError("An embodied agent requires an 'action_space' with VAE/WorldModel configs.")
@@ -604,14 +611,14 @@ class SimplifiedOrchOREmulator:
             self.world_model_params = copy.deepcopy(world_model_config)
             self.ll_params = copy.deepcopy(lifelong_learning_config or DEFAULT_LIFELONG_LEARNING_CONFIG)
             
-            # <<< START OF THE FINAL FIX: THE GIFT OF INSTINCT >>>
+            # --- FIX #3: THE GIFT OF INSTINCT ---
             # Pre-populate the agent's mind with innate "ideas" of what critical objects look like.
             # We use a random vector as a placeholder. The agent will wander until its perception
             # is "close enough" to this innate idea, at which point it will ground the concept properly.
             # This is the bootstrap for survival and opportunism.
             self.known_concept_vectors['charging_pad'] = np.random.randn(self.vae_params['LATENT_DIM']) * 0.1 
             self.known_concept_vectors['bonus_target'] = np.random.randn(self.vae_params['LATENT_DIM']) * 0.1
-            # <<< END OF THE FINAL FIX >>>
+            # --- END OF FIX #3 ---
 
             self.visual_cortex = VisualCortexVAE(original_dim=(*self.vae_params['IMG_SIZE'], 3), latent_dim=self.vae_params['LATENT_DIM'])
             try:
@@ -2273,66 +2280,69 @@ class SimplifiedOrchOREmulator:
     def _executive_update_goal_progress(self, goal_to_evaluate: Optional[GoalState], current_state_handle: StateHandle):
         """
         Updates a specific goal's progress based on the current state.
-        This version correctly handles both physical ('target_concept') and
-        abstract ('target_state') goal steps.
+        This version uses EXCLUSIVE criteria for each goal type to prevent logical flaws.
         """
-        # THE WISDOM: Do not evaluate goals that are not ACTIVE. This prevents the "success cascade".
         if not (goal_to_evaluate and goal_to_evaluate.status == "active" and goal_to_evaluate.steps):
             return
 
         goal = goal_to_evaluate
         if goal.current_step_index >= len(goal.steps):
-            return # Goal already finished
+            return
 
         current_step = goal.steps[goal.current_step_index]
         step_completed = False
         log_details = {}
-
-        # Determine if the current step is complete
-        target_concept_name = current_step.get("target_concept")
-        target_state_handle = current_step.get("target_state")
-
-        # Case 1: Abstract goal with a specific target StateHandle (typical for reasoning tasks)
-        if target_state_handle and isinstance(target_state_handle, StateHandle):
-            if current_state_handle == target_state_handle:
-                step_completed = True
-                if self.verbose >= 1: print(f"  STEP COMPLETED: [{goal.current_goal}] -> '{current_step.get('name')}' (Matched abstract state: {target_state_handle})")
-                log_details = {"goal": goal.current_goal, "step_name": current_step.get('name'), "match": str(target_state_handle)}
-
-        # Case 2: Physical goal with a visual target concept (typical for embodied tasks)
-        elif target_concept_name and target_concept_name in self.known_concept_vectors:
-            target_latent_vector = self.known_concept_vectors[target_concept_name]
-            current_latent_vector = current_state_handle.latent_vector
-            distance = np.linalg.norm(current_latent_vector - target_latent_vector)
-            completion_threshold = 1.8  # Robustness threshold
-
-            if distance < completion_threshold:
-                step_completed = True
-                if self.verbose >= 1: print(f"  STEP COMPLETED: [{goal.current_goal}] -> '{current_step.get('name')}' (Dist to '{target_concept_name}': {distance:.3f})")
-                log_details = {"goal": goal.current_goal, "step_name": current_step.get('name'), "concept": target_concept_name, "dist": distance}
         
-        # Check preconditions if they exist (future-proofing)
-        preconditions_met = True
-        if "precondition" in current_step:
-            pass 
+        # --- THE FINAL EXECUTIVE FUNCTION FIX ---
+        # Use an exclusive if/elif structure to ensure the correct completion criterion is used for each goal type.
+        
+        if goal.goal_type == 'SURVIVAL':
+            # Survival is ONLY complete when energy is full. Proximity is irrelevant for completion.
+            energy = self.last_full_obs.get('agent_energy', np.array([0.0]))[0]
+            if energy >= 99.0:
+                step_completed = True
+                log_details = {"goal": goal.current_goal, "step_name": current_step.get('name'), "reason": f"Energy full ({energy:.1f})"}
+                if self.verbose >= 1: print(f"  STEP COMPLETED (by energy): [{goal.current_goal}] -> '{current_step.get('name')}'")
+        
+        # For all other goal types, use the generic proximity or state-matching logic.
+        else:
+            target_concept_name = current_step.get("target_concept")
+            target_state_handle = current_step.get("target_state")
 
-        # If the step is complete, advance the goal state
-        if step_completed and preconditions_met:
+            if target_state_handle and isinstance(target_state_handle, StateHandle):
+                if current_state_handle == target_state_handle:
+                    step_completed = True
+                    log_details = {"goal": goal.current_goal, "step_name": current_step.get('name'), "match": str(target_state_handle)}
+
+            elif target_concept_name and target_concept_name in self.known_concept_vectors:
+                target_latent_vector = self.known_concept_vectors[target_concept_name]
+                current_latent_vector = current_state_handle.latent_vector
+                distance = np.linalg.norm(current_latent_vector - target_latent_vector)
+                completion_threshold = 1.8 
+                
+                if distance < completion_threshold:
+                    step_completed = True
+                    log_details = {"goal": goal.current_goal, "step_name": current_step.get('name'), "concept": target_concept_name, "dist": distance}
+                    if self.verbose >= 1: print(f"  STEP COMPLETED (by proximity): [{goal.current_goal}] -> '{current_step.get('name')}'")
+        
+        if step_completed:
             self._log_lot_event("goal_tracking", "step_completed", log_details)
-            self.cycles_stuck_on_step = 0  # Reset stuck counter
+            self.cycles_stuck_on_step = 0
             goal.current_step_index += 1
             goal.progress = goal.current_step_index / len(goal.steps) if goal.steps else 1.0
 
             if goal.current_step_index >= len(goal.steps):
                 goal.status = "completed"
-                # For non-persistent goals, we can now remove them
-                if goal.goal_type in ['OPPORTUNITY', 'SURVIVAL']: # Survival is episodic
-                    self.goal_manager.goals = [g for g in self.goal_manager.goals if g.current_goal != goal.current_goal]
-                
-                self._log_lot_event("goal_tracking", "goal_completed_all_steps", {"goal": goal.current_goal})
                 if self.verbose >= 1: print(f"  GOAL COMPLETED: '{goal.current_goal}' - All steps finished.")
+                self._log_lot_event("goal_tracking", "goal_completed_all_steps", {"goal": goal.current_goal})
+                
+                # For non-persistent goals, remove them from the manager's list upon completion.
+                if goal.goal_type in ['OPPORTUNITY', 'SURVIVAL']: 
+                    self.goal_manager.goals = [g for g in self.goal_manager.goals if g is not goal]
             else:
+                # This branch is for multi-step goals, like the main quest.
                 new_step_info = goal.steps[goal.current_step_index]
+                if self.verbose >= 1: print(f"  ADVANCING GOAL: '{goal.current_goal}' to step '{new_step_info.get('name')}'")
                 self._log_lot_event("goal_tracking", "step_set", {"name": new_step_info.get("name"), "index": goal.current_step_index})
 
 
@@ -3478,75 +3488,122 @@ class SimplifiedOrchOREmulator:
         and formulates a plan to service the currently most urgent goal.
         """
         self._log_lot_event("planner", "strategy_formulation_start", {
-            "active_goal": str(active_goal), 
+            "active_goal": str(active_goal),
             "mood": self.internal_state_parameters['mood']
         })
 
+        # --- THE FINAL FIX: BACKGROUND REASONING & TASK DECOMPOSITION ---
+        # Find the main quest, regardless of whether it's the active focus.
+        main_quest = next((g for g in self.goal_manager.goals if g.goal_type == 'MAIN_QUEST'), None)
+        # If the main quest exists but has no steps, the agent's top priority is to THINK and PLAN.
+        # This allows it to form a long-term plan even while handling a short-term crisis (like survival).
+        if main_quest and main_quest.status == 'active' and not main_quest.steps:
+            self._log_lot_event("planner", "background_decomposition_trigger", {"main_quest": main_quest.current_goal})
+            new_steps = self._reasoning_decompose_task(main_quest)
+            if new_steps:
+                main_quest.steps = new_steps
+                self.cycles_stuck_on_step = 0 # Reset since a new plan is formed.
+                # Even after planning, continue the cycle to act on the *current* active goal (e.g., survival).
+            else:
+                # If decomposition fails, it must mean we're missing info.
+                # The agent defaults to exploring to gather more concepts.
+                self._log_lot_event("planner", "explore_physical", {"reason": "decomposition_failed_missing_info"})
+                return 'PHYSICAL', [self.action_space.sample() for _ in range(3)]
+
         if active_goal is None:
-            # No active goals. The agent can "daydream" or reflect.
-            self._log_lot_event("planner", "no_active_goal", {})
-            self._execute_abstract_computation()
-            return 'ABSTRACT', None
-            
-        # Update the counter for how long we've been on the current step *of the active goal*
+            self._log_lot_event("planner", "no_active_goal_idle", {})
+            # With no urgent goal, explore. This is more useful than abstract thought.
+            return 'PHYSICAL', [self.action_space.sample()]
+
         if active_goal and active_goal.steps and 0 <= active_goal.current_step_index < len(active_goal.steps):
             self.cycles_stuck_on_step += 1
         else:
             self.cycles_stuck_on_step = 0
-            
-        # --- Frustration Override ---
-        # If the agent is stuck on a single step for too long, its plan is probably bad.
-        # This forces it to re-evaluate and try to decompose the problem again.
-        if self.cycles_stuck_on_step > 40:
-            self._log_lot_event("planner", "replan_trigger", {"reason": "stuck_on_step", "goal": active_goal.current_goal})
-            active_goal.steps = []
-            active_goal.current_step_index = 0
-            self.cycles_stuck_on_step = 0
-            self.internal_state_parameters['frustration'] = min(0.9, self.internal_state_parameters['frustration'] + 0.5)
-
-        # --- Autonomous Task Decomposition (for MAIN_QUEST) ---
-        # If the main quest has no steps, the agent must *reason* about how to achieve it.
-        if active_goal.goal_type == "MAIN_QUEST" and not active_goal.steps:
-            self._log_lot_event("planner", "attempt_decomposition", {"goal": active_goal.current_goal})
-            new_steps = self._reasoning_decompose_task(active_goal) 
-            if new_steps:
-                active_goal.steps = new_steps
-                self.cycles_stuck_on_step = 0 # Reset counter after successful planning
 
         # --- Physical Action Planning ---
-        # The agent acts physically if its goal requires interacting with the world.
-        is_physical_task = active_goal.evaluation_criteria == "GOAL_COMPLETION" or active_goal.goal_type in ["SURVIVAL", "OPPORTUNITY"]
-        
-        if is_physical_task:
-            # If the goal has no steps (e.g., from frustration reset or failed decomposition), explore.
+        # This part remains largely the same, but now it acts upon well-formed plans.
+        if active_goal.evaluation_criteria == "GOAL_COMPLETION" or active_goal.goal_type in ["SURVIVAL", "OPPORTUNITY"]:
             if not active_goal.steps:
                 self._log_lot_event("planner", "explore_physical", {"reason": "no_steps_for_goal", "goal": active_goal.current_goal})
-                return 'PHYSICAL', [self.action_space.sample() for _ in range(3)] # Short burst of exploration
+                return 'PHYSICAL', [self.action_space.sample() for _ in range(3)]
 
-            # --- THE FINAL CONNECTION: GOAL -> CONCEPT -> PLAN ---
-            # Try to generate a plan for the current step of the active goal.
             plan = self._reasoning_tool_physical_shooting_planner(active_goal)
             if plan:
                 self._log_lot_event("planner", "physical_plan_found", {"goal": active_goal.current_goal, "step": active_goal.current_step_index})
                 return 'PHYSICAL', plan
-
-            # If the planner fails (e.g., target concept is not yet known/grounded), explore.
-            # This is crucial: if it doesn't know what a "key" looks like, it must wander until it finds one.
+            
             self._log_lot_event("planner", "explore_physical", {"reason": "planning_failed_for_step", "goal": active_goal.current_goal})
             return 'PHYSICAL', [self.action_space.sample() for _ in range(3)]
             
-        # --- Abstract Thought Planning ---
-        # For goals explicitly about creativity or if no physical action is warranted.
-        is_creative_task = active_goal.reasoning_heuristic == "CREATIVE_GENERATION" or active_goal.evaluation_criteria == "NOVELTY"
-        if is_creative_task:
+        # --- Abstract/Creative Thought --- (If a goal specifically requires it)
+        if active_goal.reasoning_heuristic == "CREATIVE_GENERATION":
             self._log_lot_event("planner", "creative_mode_engaged", {"goal": active_goal.current_goal})
             self._execute_abstract_computation()
             return 'ABSTRACT', None
             
         # --- Ultimate Fallback ---
-        self._log_lot_event("planner", "strategy_fallback", {"reason": "unhandled_goal_type", "action": "abstract_thought"})
-        self._execute_abstract_computation()
-        return 'ABSTRACT', None
+        self._log_lot_event("planner", "strategy_fallback", {"reason": "unhandled_goal_type", "action": "exploration"})
+        return 'PHYSICAL', [self.action_space.sample()]
+
+    # You can add these two methods inside the SimplifiedOrchOREmulator class.
+    # A good place is right before the run_cycle method.
+    def save_state(self):
+        """Saves the agent's experiential intelligence to a .pkl file."""
+        filepath = f"{self.agent_id}.pkl"
+        print(f"[{self.agent_id}] Saving experiential state to {filepath}...")
+        try:
+            # We don't save the deep learning models here, as they have their own save mechanism.
+            state_data = {
+                'long_term_memory': self.long_term_memory,
+                'experience_replay_buffer': self.experience_replay_buffer.buffer if self.experience_replay_buffer else None,
+                'known_concept_vectors': self.known_concept_vectors,
+                'known_goal_latent_vectors': self.known_goal_latent_vectors,
+                'goals': self.goal_manager.goals,
+                'internal_state_parameters': self.internal_state_parameters,
+                'metacognition_params': self.metacognition_params,
+                'E_OR_THRESHOLD': self.E_OR_THRESHOLD,
+                'orp_decay_rate': self.orp_decay_rate,
+                'cycle_history': self.cycle_history,
+                'current_cycle_num': self.current_cycle_num,
+                'smn_influence_matrix': self.smn_influence_matrix
+            }
+            with open(filepath, 'wb') as f:
+                pickle.dump(state_data, f)
+            print(f"[{self.agent_id}] State successfully saved.")
+        except Exception as e:
+            print(f"[{self.agent_id}] ERROR saving state: {e}")
+
+    def load_state(self):
+        """Loads the agent's experiential intelligence from a .pkl file if it exists."""
+        filepath = f"{self.agent_id}.pkl"
+        if os.path.exists(filepath):
+            print(f"[{self.agent_id}] Found existing state file. Loading from {filepath}...")
+            try:
+                with open(filepath, 'rb') as f:
+                    state_data = pickle.load(f)
+                
+                # Carefully restore the state
+                self.long_term_memory.update(state_data.get('long_term_memory', {}))
+                if self.experience_replay_buffer and state_data.get('experience_replay_buffer'):
+                    self.experience_replay_buffer.buffer = state_data['experience_replay_buffer']
+                self.known_concept_vectors = state_data.get('known_concept_vectors', self.known_concept_vectors)
+                self.known_goal_latent_vectors = state_data.get('known_goal_latent_vectors', {})
+                self.goal_manager.goals = state_data.get('goals', [])
+                self.internal_state_parameters = state_data.get('internal_state_parameters', self.internal_state_parameters)
+                self.metacognition_params = state_data.get('metacognition_params', self.metacognition_params)
+                self.E_OR_THRESHOLD = state_data.get('E_OR_THRESHOLD', self.E_OR_THRESHOLD)
+                self.orp_decay_rate = state_data.get('orp_decay_rate', self.orp_decay_rate)
+                self.cycle_history = state_data.get('cycle_history', self.cycle_history)
+                self.current_cycle_num = state_data.get('current_cycle_num', 0)
+                if 'smn_influence_matrix' in state_data and self.smn_influence_matrix.shape == state_data['smn_influence_matrix'].shape:
+                    self.smn_influence_matrix = state_data['smn_influence_matrix']
+                
+                print(f"[{self.agent_id}] State successfully loaded. Resuming from cycle {self.current_cycle_num}.")
+
+            except Exception as e:
+                print(f"[{self.agent_id}] ERROR loading state file (it might be corrupted). Starting fresh. Error: {e}")
+        else:
+            print(f"[{self.agent_id}] No existing state file found. Starting with a fresh mind.")
     
 
     def run_cycle(self, raw_image_observation: np.ndarray, last_reward: float, last_info: Dict, is_terminated: bool, current_full_obs: Dict) -> Optional[int]:
