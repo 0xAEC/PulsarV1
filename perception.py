@@ -6,7 +6,6 @@ It contains the Visual Cortex (a Variational Autoencoder) for perception and the
 Predictive World Model (an LSTM) for imagination.
 """
 
-# This is the canonical, most robust way to import Keras
 from tensorflow import keras
 from tensorflow.keras import layers, Model
 import tensorflow as tf
