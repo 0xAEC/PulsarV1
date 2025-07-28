@@ -37,38 +37,28 @@ if __name__ == '__main__':
     print(f"Global random seed set to: {seed_val}")
 
     # --- Step 1: Bootstrap the Agent's Perception ---
-    # In a real scenario, you might do this once and save the weights.
-    # For this demo, we'll do a quick pre-training session.
+    # This step is only run if the weight files don't exist.
     print("\n--- Bootstrapping Agent's Perception & World Model ---")
     bootstrap_env = SimpleGridworld(render_mode='rgb_array')
     
-    # Check if pre-trained models exist
     vae_path = DEFAULT_VAE_CONFIG['MODEL_PATH']
     wm_path = DEFAULT_WORLD_MODEL_CONFIG['MODEL_PATH']
 
     if os.path.exists(vae_path) and os.path.exists(wm_path):
         print("Found pre-trained perception models. Loading them.")
-        # We don't need to load them here; the agent's __init__ will handle it.
-        pass
     else:
         print("No pre-trained models found. Performing a quick training session...")
-        # Collect a small dataset for demonstration purposes
         experiences = collect_experience_data(bootstrap_env, num_steps=1500)
-        # Train the "eyes"
         vae = train_visual_cortex(experiences, epochs=10) 
-        # Train the "imagination"
         world_model = train_world_model(vae, experiences, epochs=15)
-        # Save the models for future runs
         vae.save_weights(vae_path)
         world_model.save_weights(wm_path)
         print("Perception models trained and saved.")
     
     bootstrap_env.close()
 
-    # --- Step 2: Initialize the Embodied Agent ---
+    # --- Step 2: Initialize the Embodied Agent & Environment ---
     print("\n--- Initializing Autonomous Embodied Agent ---")
-    
-    # The agent now needs a body (action_space) and its perception systems
     env = SimpleGridworld(render_mode='human', add_door_key=True)
     
     agent_config = {
@@ -81,48 +71,53 @@ if __name__ == '__main__':
     }
     agent = SimplifiedOrchOREmulator(**agent_config)
 
-    # --- Step 3: Give the Agent a High-Level Goal ---
-    # The agent must figure out the steps itself (acquire key, open door, reach target).
-    main_quest = GoalState(
-        current_goal="Reach the final target",
-        steps=[], # The agent must discover the steps via its reasoning!
-        base_priority=0.7,
-        evaluation_criteria="GOAL_COMPLETION"
-    )
-    agent.set_goal_state(main_quest)
-
-    # --- Step 4: Run the Main Simulation Loop ---
-    print("\n--- Starting Main Simulation Loop ---")
-    obs, info = env.reset()
-    reward = 0.0
-    terminated = False
+    # <-- NEW SECTION: LOAD STATE & SET GOALS -->
+    # Attempt to load the agent's previous "life"
+    agent.load_state() 
     
-    # We need to get the first image observation for the agent's first cycle
-    img_obs = env.render()
+    # If the agent doesn't have a main quest (e.g., first run or completed last time), give it one.
+    if not any(g.goal_type == 'MAIN_QUEST' for g in agent.goal_manager.goals):
+        print("Agent has no main quest. Assigning a new one.")
+        main_quest = GoalState(
+            current_goal="Reach the final target",
+            steps=[], 
+            base_priority=0.7,
+            evaluation_criteria="GOAL_COMPLETION"
+        )
+        agent.set_goal_state(main_quest)
+
+    # --- Step 3: Run the Main Simulation Loop (with robust save on exit) ---
+    try:
+        print("\n--- Starting Main Simulation Loop ---")
+        obs, info = env.reset()
+        reward = 0.0
+        terminated = False
+        img_obs = env.render()
     
-    # The agent runs for a maximum number of steps
-    for cycle in range(500):
-        # The agent's core cognitive-motor loop
-        action = agent.run_cycle(img_obs, reward, info, terminated, obs)
+        for cycle in range(500):
+            action = agent.run_cycle(img_obs, reward, info, terminated, obs)
 
-        # If the agent decides to "think" instead of act, we skip the env step
-        if action is None:
-            print(f"[Cycle {cycle+1}] Agent chose to think. World is paused.")
-            time.sleep(0.5) # Pause to make "thinking" visible
-            # In the next loop, the agent will see the same image but with an updated internal state
-            continue
+            if action is None:
+                print(f"[Cycle {agent.current_cycle_num}] Agent chose to think. World is paused.")
+                time.sleep(0.5) 
+                continue
 
-        # If the agent chose an action, apply it to the world
-        obs, reward, terminated, truncated, info = env.step(action)
-        img_obs = env.render() # Get the visual result of the action
+            obs, reward, terminated, truncated, info = env.step(action)
+            img_obs = env.render()
 
-        if terminated or truncated:
-            print(f"\n--- Episode Finished (Reason: {'Goal Reached' if reward > 0 else 'Death/Truncated'}) ---")
-            break
-            
-        # Give a moment to observe the agent's action
-        time.sleep(0.1)
+            if terminated or truncated:
+                print(f"\n--- Episode Finished (Reason: {'Goal Reached' if reward > 0 else 'Death/Truncated'}) ---")
+                # Run one final cycle to process the terminal state
+                agent.run_cycle(img_obs, reward, info, terminated, obs)
+                break
+                
+            time.sleep(0.1)
 
-    print("\n--- Simulation Complete ---")
-    agent.print_internal_state_summary()
-    env.close()
+    except KeyboardInterrupt:
+        print("\n--- Simulation interrupted by user. ---")
+    finally:
+        # --- Step 4: Final Wrap-up ---
+        print("\n--- Simulation Complete ---")
+        agent.print_internal_state_summary()
+        agent.save_state() # <-- NEW: Save the agent's final state
+        env.close()
